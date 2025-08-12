@@ -412,10 +412,3 @@ def health():
 def index():
     return "yamanekoEATS bot running"
 
-# ←検証用。GET/POSTどちらでも200を返す
-@app.route("/webhook", methods=["GET", "POST"])
-def webhook():
-    if request.method == "GET":
-        return "OK"
-    # POSTの中身は無視して常に200
-    return "OK"
