@@ -106,18 +106,26 @@ def candidate_bubble(store, lang="jp"):
     )
 
 # ====== Webhook ======
-@app.route("/webhook", methods=["GET", "POST"])
+@app.route("/webhook", methods=["GET", "POST"], strict_slashes=False)
 def webhook():
+    # デバッグ用ログ（RenderのLogsに出ます）
+    try:
+        print("[WEBHOOK] method=", request.method, "path=", request.path)
+    except Exception:
+        pass
+
     if request.method == "GET":
-        return "OK"  # ブラウザで https://＜URL＞/webhook が確認できる
+        return "OK"  # ブラウザ確認用
 
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
+
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        # 開発中は 200 返しで前に進む。運用に慣れたら 400 に戻してOK
+        # 開発中は200返しでVerifyを通しやすくする（慣れたら abort(400) に戻してOK）
         return "OK", 200
+
     return "OK"
 
 
