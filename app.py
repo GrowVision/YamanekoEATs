@@ -1,6 +1,7 @@
 import os, json, re, math, datetime
 from datetime import timedelta, timezone
 from flask import Flask, request, abort
+import csv, io, requests
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -44,6 +45,74 @@ STORES = [
 ]
 
 STORE_BY_ID = {s["store_id"]: s for s in STORES}
+
+# ====== ストア情報：スプレッドシート連携 ======
+STORES_SHEET_CSV_URL = os.getenv("STORES_SHEET_CSV_URL")
+STORES_RELOAD_TOKEN = os.getenv("STORES_RELOAD_TOKEN", "")
+
+def _parse_bool(v):
+    return str(v).strip().lower() in ("1","true","yes","y","on","はい","有","可能","ok")
+
+def _load_stores_from_csv(url: str):
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    f = io.StringIO(resp.text)
+    reader = csv.DictReader(f)
+    stores = []
+    for row in reader:
+        sid = (row.get("store_id") or "").strip()
+        name = (row.get("name") or "").strip()
+        profile = (row.get("profile") or "").strip()
+        map_url = (row.get("map_url") or "").strip()
+        pickup_ok = _parse_bool(row.get("pickup_ok"))
+        line_user_id = (row.get("line_user_id") or "").strip()
+        # 必須: store_id, name, line_user_id
+        if not sid or not name or not line_user_id:
+            continue
+        stores.append({
+            "store_id": sid,
+            "name": name,
+            "profile": profile,
+            "map_url": map_url,
+            "pickup_ok": pickup_ok,
+            "line_user_id": line_user_id
+        })
+    return stores
+
+def refresh_stores():
+    """環境変数のCSV URLがあれば、STORES/STORE_BY_IDを上書き"""
+    global STORES, STORE_BY_ID
+    if not STORES_SHEET_CSV_URL:
+        print("[STORES] STORES_SHEET_CSV_URL not set; using in-code STORES")
+        return
+    try:
+        new_stores = _load_stores_from_csv(STORES_SHEET_CSV_URL)
+        if new_stores:
+            STORES = new_stores
+            STORE_BY_ID = {s["store_id"]: s for s in STORES}
+            print(f"[STORES] Loaded {len(STORES)} stores from sheet")
+        else:
+            print("[STORES] Sheet had no valid rows; keeping previous list")
+    except Exception as e:
+        print("[STORES] Failed to load sheet:", e)
+
+# 起動時に一度ロード（環境変数があればシートで上書き）
+refresh_stores()
+
+# 手動リロード用（token一致時のみ）
+@app.route("/admin/reload_stores")
+def admin_reload_stores():
+    token = request.args.get("token", "")
+    if not STORES_RELOAD_TOKEN or token != STORES_RELOAD_TOKEN:
+        return abort(403)
+    refresh_stores()
+    return "ok"
+
+# 簡易プレビュー（任意）
+@app.route("/admin/stores_preview")
+def admin_stores_preview():
+    return {"count": len(STORES), "stores": STORES[:5]}
+
 
 # ====== 簡易セッション／リクエスト保持（メモリ） ======
 SESS = {}       # user_id -> {lang,time_iso,pax,pickup,hotel, req_id}
