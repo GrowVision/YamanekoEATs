@@ -404,13 +404,18 @@ def finalize_booking(reply_token, user_id):
     # REQUESTS は残してもOK。軽量運用なら削除してもよい。
     # REQUESTS.pop(pb["req_id"], None)
 
-# ヘルスチェック
 @app.route("/health")
 def health():
     return "ok"
 
-# トップページ（任意・動作確認用）
 @app.route("/")
 def index():
     return "yamanekoEATS bot running"
 
+# ←検証用。GET/POSTどちらでも200を返す
+@app.route("/webhook", methods=["GET", "POST"])
+def webhook():
+    if request.method == "GET":
+        return "OK"
+    # POSTの中身は無視して常に200
+    return "OK"
