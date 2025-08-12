@@ -138,6 +138,18 @@ def on_text(event: MessageEvent):
     user_id = event.source.user_id
     text = (event.message.text or "").strip()
 
+    # ★暫定：店舗登録（友だち追加済みの店舗から user_id を回収）
+    # 「店舗登録 店名」 だけでなく、全角スペースにも対応
+    m = re.match(r"^店舗登録(?:\s+|　)(.+)$", text)
+    if m:
+        store_name = m.group(1).strip() or "未入力"
+        print(f"[STORE_REG] {store_name}: {user_id}")  # ←RenderのLogsに出ます
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(f"店舗登録OK：{store_name}\nこのIDを運営に送ってください：\n{user_id}")
+        )
+        return  # ここで終了（以下の通常フローは通さない）
+
     # --- 5+ の数値入力を待っている場合 ---
     if SESS.get(user_id, {}).get("await") == "pax_number":
         m = re.match(r"^\d{1,2}$", text)
