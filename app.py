@@ -106,24 +106,27 @@ def candidate_bubble(store, lang="jp"):
     )
 
 # ====== Webhook ======
-@app.route("/webhook", methods=["GET", "POST"], strict_slashes=False)
+# /webhook: すべてのHTTPメソッドを許可し、まずログを出す
+@app.route("/webhook", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE", "PATCH"], strict_slashes=False)
 def webhook():
-    # デバッグ用ログ（RenderのLogsに出ます）
+    # --- ログ（RenderのLogsに出ます）
     try:
         print("[WEBHOOK] method=", request.method, "path=", request.path)
+        # LINEのVerifyが本当にPOSTを投げているか、ここで分かります
     except Exception:
         pass
 
-    if request.method == "GET":
-        return "OK"  # ブラウザ確認用
+    # --- 開発中は、どのメソッドでも 200 を返して先に進む ---
+    if request.method != "POST":
+        return "OK"  # GET/HEAD/OPTIONS でも 200
 
+    # POSTの場合のみ、LINE SDKへ渡す
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
-
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        # 開発中は200返しでVerifyを通しやすくする（慣れたら abort(400) に戻してOK）
+        # 署名不一致でも 200 返し（Verify を通しやすくする）
         return "OK", 200
 
     return "OK"
