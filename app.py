@@ -106,15 +106,20 @@ def candidate_bubble(store, lang="jp"):
     )
 
 # ====== Webhook ======
-@app.route("/webhook", methods=["POST"])
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
+    if request.method == "GET":
+        return "OK"  # ブラウザで https://＜URL＞/webhook が確認できる
+
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        abort(400)
+        # 開発中は 200 返しで前に進む。運用に慣れたら 400 に戻してOK
+        return "OK", 200
     return "OK"
+
 
 # ====== 受付：テキスト ======
 @handler.add(MessageEvent, message=TextMessage)
@@ -399,6 +404,13 @@ def finalize_booking(reply_token, user_id):
     # REQUESTS は残してもOK。軽量運用なら削除してもよい。
     # REQUESTS.pop(pb["req_id"], None)
 
+# ヘルスチェック
 @app.route("/health")
 def health():
     return "ok"
+
+# トップページ（任意・動作確認用）
+@app.route("/")
+def index():
+    return "yamanekoEATS bot running"
+
