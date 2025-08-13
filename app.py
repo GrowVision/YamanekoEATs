@@ -2,6 +2,7 @@ import os, json, re, math, datetime
 from datetime import timedelta, timezone
 from flask import Flask, request, abort
 import csv, io, requests
+import threading
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -173,6 +174,34 @@ def candidate_bubble(store, lang="jp"):
             ]
         )
     )
+
+def schedule_timeout_notice(req_id: str):
+    """締切時点で候補0件ならユーザーへ『満席でした』を自動通知してクローズ"""
+    def _notify():
+        req = REQUESTS.get(req_id)
+        if not req or req.get("closed"):
+            return
+        # すでに1件以上あれば何もしない（来た分は逐次提示済み）
+        if len(req.get("candidates", set())) == 0:
+            lang = SESS.get(req["user_id"], {}).get("lang", "jp")
+            jp = "現在、予約可能な店舗が見つかりませんでした。お手数ですが、時間や人数を変えて再度お試しください。"
+            en = "Currently all full for your request. Please try another time or party size."
+            try:
+                line_bot_api.push_message(req["user_id"], TextSendMessage(lang_text(lang, jp, en)))
+            except Exception as e:
+                print("timeout notice failed:", e)
+        # いずれにせよクローズ
+        req["closed"] = True
+
+    def _arm_timer():
+        req = REQUESTS.get(req_id)
+        if not req or req.get("closed"):
+            return
+        # デッドラインまでの秒数
+        delay = max(0, int((req["deadline"] - now_jst()).total_seconds()))
+        threading.Timer(delay, _notify).start()
+
+    _arm_timer()
 
 # ====== Webhook ======
 # /webhook: すべてのHTTPメソッドを許可し、まずログを出す
@@ -459,6 +488,10 @@ def start_inquiry(reply_token, user_id):
             )
         except Exception as e:
             print("push to store failed:", s["name"], e)
+
+    # 15分の締切時に候補0件なら自動通知
+    schedule_timeout_notice(req_id)
+
 
 # ====== 予約確定 ======
 def finalize_booking(reply_token, user_id):
