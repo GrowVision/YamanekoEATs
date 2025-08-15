@@ -365,8 +365,10 @@ def on_text(event: MessageEvent):
                 reply_or_push(user_id, event.reply_token, TextSendMessage("電話番号の形式で入力してください（例：07012345678）"))
                 return
             PENDING_BOOK[user_id]["phone"] = text
-            finalize_booking(event.reply_token, user_id)
+            # ★予約確定の最終確認を表示（Yes→finalize、No→リセット）
+            ask_booking_confirm(event.reply_token, user_id)
             return
+
 
     # デフォルト
     reply_or_push(user_id, event.reply_token, TextSendMessage("下のリッチメニュー「予約 / Reserve」を押して開始してください。"))
@@ -380,18 +382,25 @@ def on_postback(event: PostbackEvent):
     except Exception:
         data = {}
 
-    # 店舗側からの回答（OK/不可）
-    if data.get("type") == "store_reply":
-        req_id = data.get("req_id")
-        status = data.get("status")
+        # 店舗側からの回答（OK/不可）
+        if data.get("type") == "store_reply":
+        req_id   = data.get("req_id")
+        status   = data.get("status")
         store_id = data.get("store_id")
         req = REQUESTS.get(req_id)
         if not req:
             return
+        # 締切後 or クローズ後は完全無視
         if now_jst() > req["deadline"] or req.get("closed"):
             return
+
+        # ★同一店舗からの重複OKは無視（先に来た1回だけ有効）
         if status == "ok":
+            if store_id in req["candidates"]:
+                return  # 既に受け付け済みなので何もしない
             req["candidates"].add(store_id)
+
+            # ユーザーへ候補カードを1回だけ送る
             store = STORE_BY_ID.get(store_id)
             if store:
                 lang = SESS.get(req["user_id"], {}).get("lang", "jp")
@@ -402,8 +411,11 @@ def on_postback(event: PostbackEvent):
                 )
             if len(req["candidates"]) >= 3:
                 req["closed"] = True
+
+        # 「不可」は今は何もしない
         return
 
+    
     step = data.get("step")
 
     if step == "lang":
@@ -452,6 +464,20 @@ def on_postback(event: PostbackEvent):
             SESS[user_id] = {}
             ask_lang(event.reply_token, user_id)
         return
+
+        # ★予約確定の最終確認 Yes/No（氏名・電話を入れた後の確認）
+    if step == "book_confirm":
+        v = data.get("v", "no")
+        if v == "yes":
+            # ここで本当に予約を確定（店舗・ユーザーに最終連絡）
+            finalize_booking(event.reply_token, user_id)
+        else:
+            # 入力をリセットして最初からやり直し
+            SESS[user_id] = {}
+            PENDING_BOOK.pop(user_id, None)
+            ask_lang(event.reply_token, user_id)
+        return
+
 
 
 # ====== 質問UI ======
@@ -531,6 +557,83 @@ def ask_confirm(reply_token, user_id):
     reply_or_push(user_id, reply_token,
                   TextSendMessage(text, quick_reply=qreply(actions)))
 
+def ask_confirm(reply_token, user_id):
+    sess = SESS.get(user_id, {})
+    lang = sess.get("lang", "jp")
+
+    # 表示用テキストを整形
+    t_str = "-"
+    try:
+        if sess.get("time_iso"):
+            t_str = datetime.datetime.fromisoformat(sess["time_iso"]).astimezone(JST).strftime("%H:%M")
+    except Exception:
+        pass
+    pax = sess.get("pax", "-")
+    pick = "希望" if sess.get("pickup") else "不要"
+    hotel = sess.get("hotel") or "-"
+
+    jp  = f"この内容で照会します。\n時間：{t_str}\n人数：{pax}名\n送迎：{pick}（{hotel}）\nよろしいですか？"
+    en  = f"Send inquiry with:\nTime: {t_str}\nParty: {pax}\nPickup: {'Need' if sess.get('pickup') else 'No'} ({hotel})\nProceed?"
+    text = lang_text(lang, jp, en)
+
+    actions = [
+        PostbackAction(label=lang_text(lang, "はい", "Yes"),
+                       data=json.dumps({"step": "confirm", "v": "yes"})),
+        PostbackAction(label=lang_text(lang, "いいえ", "No"),
+                       data=json.dumps({"step": "confirm", "v": "no"})),
+    ]
+    reply_or_push(user_id, reply_token,
+                  TextSendMessage(text, quick_reply=qreply(actions)))
+
+# ★ここから新規追加：予約確定の最終確認（店舗を選んで氏名・電話を入れた後）
+def ask_booking_confirm(reply_token, user_id):
+    """店舗決定後、氏名・電話まで受け取った後の最終予約確認"""
+    pb   = PENDING_BOOK.get(user_id, {})
+    req  = REQUESTS.get(pb.get("req_id"))
+    st   = STORE_BY_ID.get(pb.get("store_id"))
+    lang = SESS.get(user_id, {}).get("lang", "jp")
+
+    if not req or not st or not pb.get("name") or not pb.get("phone"):
+        reply_or_push(user_id, reply_token, TextSendMessage(
+            lang_text(lang, "情報を取得できませんでした。最初からやり直してください。", "Session not found. Please start over.")
+        ))
+        return
+
+    t_str = datetime.datetime.fromisoformat(req["wanted_iso"]).astimezone(JST).strftime("%H:%M")
+    pick  = "希望" if req["pickup"] else "不要"
+    hotel = req.get("hotel") or "-"
+
+    jp = (
+        f"この内容で予約を確定します。\n"
+        f"店舗：{st['name']}\n"
+        f"時間：{t_str}\n"
+        f"人数：{req['pax']}名\n"
+        f"送迎：{pick}（{hotel}）\n"
+        f"お名前：{pb['name']}\n"
+        f"電話：{pb['phone']}\n"
+        f"よろしいですか？"
+    )
+    en = (
+        f"Confirm booking with:\n"
+        f"Restaurant: {st['name']}\n"
+        f"Time: {t_str}\n"
+        f"Party: {req['pax']}\n"
+        f"Pickup: {'Need' if req['pickup'] else 'No'} ({hotel})\n"
+        f"Name: {pb['name']}\n"
+        f"Phone: {pb['phone']}\n"
+        f"Proceed?"
+    )
+
+    actions = [
+        PostbackAction(label=lang_text(lang, "はい", "Yes"),
+                       data=json.dumps({"step":"book_confirm", "v":"yes"})),
+        PostbackAction(label=lang_text(lang, "いいえ", "No"),
+                       data=json.dumps({"step":"book_confirm", "v":"no"})),
+    ]
+    reply_or_push(user_id, reply_token,
+                  TextSendMessage(lang_text(lang, jp, en), quick_reply=qreply(actions)))
+
+
 
 # ====== 照会スタート → 店舗一斉送信 ======
 def start_inquiry(reply_token, user_id):
@@ -547,7 +650,9 @@ def start_inquiry(reply_token, user_id):
         "pickup": sess.get("pickup"),
         "hotel": sess.get("hotel", ""),
         "candidates": set(),
-        "closed": False
+        "closed": False,
+        # ★この照会に対して既に返信した店舗を記録
+        "replied_by": set(),
     }
     SESS[user_id]["req_id"] = req_id
 
@@ -572,27 +677,30 @@ def start_inquiry(reply_token, user_id):
         if sess["pickup"] and not s["pickup_ok"]:
             continue
 
-        text = f"【照会】{wanted}／{pax}名／送迎：{pickup_label}（{hotel}）\n" \
-               f"⏰ 締切：{deadline_str}（あと{remain}分）\n" \
-               f"押すだけで返信👇\n" \
-               f"REQ: {req_id}"
+        # ★REQは本文に書かない（店舗に不要情報を出さない）
+        text = (
+            f"【照会】{wanted}／{pax}名／送迎：{pickup_label}（{hotel}）\n"
+            f"⏰ 締切：{deadline_str}（あと{remain}分）\n"
+            f"押すだけで返信👇"
+        )
 
         actions = [
-            PostbackAction(label="OK", data=json.dumps(
+            PostbackAction(label="OK",  data=json.dumps(
                 {"type":"store_reply","req_id":req_id,"store_id":s["store_id"],"status":"ok"})),
             PostbackAction(label="不可", data=json.dumps(
                 {"type":"store_reply","req_id":req_id,"store_id":s["store_id"],"status":"no"})),
         ]
-        
+
+        # pushは失敗理由をログに残す安全版を使用
         safe_push(
             s["line_user_id"],
             TextSendMessage(text=text, quick_reply=qreply(actions)),
             s["name"]
         )
 
-
     # 15分の締切時に候補0件なら自動通知
     schedule_timeout_notice(req_id)
+
 
 
 # ====== 予約確定 ======
