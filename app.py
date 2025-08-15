@@ -143,6 +143,24 @@ def lang_text(lang, jp, en):
 def make_req_id():
     return "REQ-" + now_jst().strftime("%Y%m%d-%H%M%S")
 
+# --- reply→失敗時はpushへフォールバック ---
+def reply_or_push(user_id, reply_token, *messages):
+    msg = list(messages)
+    if len(msg) == 1:
+        msg = msg[0]
+    try:
+        line_bot_api.reply_message(reply_token, msg)
+    except Exception as e:
+        try:
+            if user_id:
+                line_bot_api.push_message(user_id, msg)
+                print("[FALLBACK] reply→push", e)
+            else:
+                print("[FALLBACK] reply failed (no user_id)", e)
+        except Exception as e2:
+            print("[FALLBACK] both failed", e, e2)
+
+
 # ====== Flex: 候補カード ======
 def candidate_bubble(store, lang="jp"):
     title = store["name"]
@@ -281,7 +299,7 @@ def on_text(event: MessageEvent):
         SESS[user_id]["pax"] = int(text)
         SESS[user_id].pop("await", None)
         # 次へ（送迎）
-        ask_pickup(event.reply_token, SESS[user_id]["lang"])
+        ask_pickup(event.reply_token, SESS[user_id]["lang"], user_id)
         return
 
     # --- ホテル名入力を待っている場合（任意） ---
@@ -296,8 +314,9 @@ def on_text(event: MessageEvent):
         # トリガー（表記ゆれ／日英併記「予約する/Reserve」「予約をはじめる Start reservation」に対応）
     if is_start_trigger(text):
         SESS[user_id] = {}
-        ask_lang(event.reply_token)
+        ask_lang(event.reply_token, user_id)
         return
+
 
     # 予約フロー：名前・電話
     if user_id in PENDING_BOOK:
@@ -360,12 +379,12 @@ def on_postback(event: PostbackEvent):
     if step == "lang":
         v = data.get("v", "jp")
         SESS.setdefault(user_id, {})["lang"] = v
-        ask_time(event.reply_token, v)
+        ask_time(event.reply_token, v, user_id)
         return
 
     if step == "time":
         SESS.setdefault(user_id, {})["time_iso"] = data.get("iso")
-        ask_pax(event.reply_token, SESS[user_id].get("lang", "jp"))
+        ask_pax(event.reply_token, SESS[user_id].get("lang", "jp"), user_id)
         return
 
     if step == "pax":
@@ -401,58 +420,52 @@ def on_postback(event: PostbackEvent):
         return
 
 # ====== 質問UI ======
-def ask_lang(reply_token):
+def ask_lang(reply_token, user_id):
     actions = [
-        PostbackAction(label="日本語", data=json.dumps({"step":"lang","v":"jp"})),
+        PostbackAction(label="日本語",  data=json.dumps({"step":"lang","v":"jp"})),
         PostbackAction(label="English", data=json.dumps({"step":"lang","v":"en"})),
     ]
-    line_bot_api.reply_message(reply_token, TextSendMessage("言語を選んでください / Choose your language", quick_reply=qreply(actions)))
+    reply_or_push(
+        user_id, reply_token,
+        TextSendMessage("言語を選んでください / Choose your language",
+                        quick_reply=qreply(actions))
+    )
 
-def ask_time(reply_token, lang):
+def ask_time(reply_token, lang, user_id):
     slots = next_half_hour_slots(6)
     actions = []
     for s in slots:
         label = s.strftime("%H:%M")
         actions.append(PostbackAction(label=label, data=json.dumps({"step":"time","iso":s.isoformat()})))
-    line_bot_api.reply_message(
-        reply_token,
-        TextSendMessage(lang_text(lang, "ご希望の時間を選んでください", "Choose your time"), quick_reply=qreply(actions))
+    reply_or_push(
+        user_id, reply_token,
+        TextSendMessage(lang_text(lang, "ご希望の時間を選んでください", "Choose your time"),
+                        quick_reply=qreply(actions))
     )
 
-def ask_pax(reply_token, lang):
+def ask_pax(reply_token, lang, user_id):
     actions = [
-        PostbackAction(label="1", data=json.dumps({"step":"pax","v":1})),
-        PostbackAction(label="2", data=json.dumps({"step":"pax","v":2})),
-        PostbackAction(label="3", data=json.dumps({"step":"pax","v":3})),
-        PostbackAction(label="4", data=json.dumps({"step":"pax","v":4})),
+        PostbackAction(label="1",  data=json.dumps({"step":"pax","v":1})),
+        PostbackAction(label="2",  data=json.dumps({"step":"pax","v":2})),
+        PostbackAction(label="3",  data=json.dumps({"step":"pax","v":3})),
+        PostbackAction(label="4",  data=json.dumps({"step":"pax","v":4})),
         PostbackAction(label="5+", data=json.dumps({"step":"pax5plus"})),
     ]
-    # 5+ はテキスト入力待ちにする
-    line_bot_api.reply_message(
-        reply_token,
-        TextSendMessage(lang_text(lang, "人数を選んでください", "Select number of people"), quick_reply=qreply(actions))
+    reply_or_push(
+        user_id, reply_token,
+        TextSendMessage(lang_text(lang, "人数を選んでください", "Select number of people"),
+                        quick_reply=qreply(actions))
     )
 
-@handler.add(PostbackEvent)
-def on_pax5plus(event: PostbackEvent):
-    # 5+専用の分岐（SDKのハンドラはイベント単位なので上書きしないため注意）
-    try:
-        data = json.loads(event.postback.data or "{}")
-    except:
-        data = {}
-    if data.get("step") == "pax5plus":
-        user_id = event.source.user_id
-        SESS.setdefault(user_id, {})["await"] = "pax_number"
-        line_bot_api.reply_message(event.reply_token, TextSendMessage("人数を数字で入力してください（例：6）"))
-
-def ask_pickup(reply_token, lang):
+def ask_pickup(reply_token, lang, user_id):
     actions = [
         PostbackAction(label=lang_text(lang, "必要", "Need"), data=json.dumps({"step":"pickup","need":True})),
-        PostbackAction(label=lang_text(lang, "不要", "No"), data=json.dumps({"step":"pickup","need":False})),
+        PostbackAction(label=lang_text(lang, "不要", "No"),   data=json.dumps({"step":"pickup","need":False})),
     ]
-    line_bot_api.reply_message(
-        reply_token,
-        TextSendMessage(lang_text(lang, "送迎は必要ですか？", "Need pickup service?"), quick_reply=qreply(actions))
+    reply_or_push(
+        user_id, reply_token,
+        TextSendMessage(lang_text(lang, "送迎は必要ですか？", "Need pickup service?"),
+                        quick_reply=qreply(actions))
     )
 
 # ====== 照会スタート → 店舗一斉送信 ======
