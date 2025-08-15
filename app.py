@@ -160,7 +160,6 @@ def reply_or_push(user_id, reply_token, *messages):
         except Exception as e2:
             print("[FALLBACK] both failed", e, e2)
 
-
 # ====== Flex: 候補カード ======
 def candidate_bubble(store, lang="jp"):
     title = store["name"]
@@ -278,23 +277,21 @@ def on_text(event: MessageEvent):
     user_id = event.source.user_id
     text = (event.message.text or "").strip()
 
-    # ★暫定：店舗登録（友だち追加済みの店舗から user_id を回収）
-    # 「店舗登録 店名」 だけでなく、全角スペースにも対応
+    # ★暫定：店舗登録
     m = re.match(r"^店舗登録(?:\s+|　)(.+)$", text)
     if m:
         store_name = m.group(1).strip() or "未入力"
-        print(f"[STORE_REG] {store_name}: {user_id}")  # ←RenderのLogsに出ます
-        line_bot_api.reply_message(
-            event.reply_token,
+        print(f"[STORE_REG] {store_name}: {user_id}")
+        reply_or_push(user_id, event.reply_token,
             TextSendMessage(f"店舗登録OK：{store_name}\nこのIDを運営に送ってください：\n{user_id}")
         )
-        return  # ここで終了（以下の通常フローは通さない）
+        return
 
     # --- 5+ の数値入力を待っている場合 ---
     if SESS.get(user_id, {}).get("await") == "pax_number":
         m = re.match(r"^\d{1,2}$", text)
         if not m:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage("人数を数字で入力してください（例：6）"))
+            reply_or_push(user_id, event.reply_token, TextSendMessage("人数を数字で入力してください（例：6）"))
             return
         SESS[user_id]["pax"] = int(text)
         SESS[user_id].pop("await", None)
@@ -302,21 +299,18 @@ def on_text(event: MessageEvent):
         ask_pickup(event.reply_token, SESS[user_id]["lang"], user_id)
         return
 
-    # --- ホテル名入力を待っている場合（任意） ---
+    # --- ホテル名入力を待っている場合（任意） → 入力後に確認画面へ ---
     if SESS.get(user_id, {}).get("await") == "hotel_name":
         SESS[user_id]["hotel"] = text
         SESS[user_id].pop("await", None)
-        # 3要素揃っているはずなので照会へ
-        start_inquiry(event.reply_token, user_id)
+        ask_confirm(event.reply_token, user_id)
         return
 
-    # トリガー
-        # トリガー（表記ゆれ／日英併記「予約する/Reserve」「予約をはじめる Start reservation」に対応）
-    if is_start_trigger(text):
+    # トリガー（既存のキーワードでOK）
+    if text in ["予約をはじめる", "Start reservation", "予約する", "Reserve", "予約 / Reserve", "予約する/Reserve"]:
         SESS[user_id] = {}
         ask_lang(event.reply_token, user_id)
         return
-
 
     # 予約フロー：名前・電話
     if user_id in PENDING_BOOK:
@@ -324,28 +318,27 @@ def on_text(event: MessageEvent):
         if pb["step"] == "name":
             PENDING_BOOK[user_id]["name"] = text
             PENDING_BOOK[user_id]["step"] = "phone"
-            line_bot_api.reply_message(event.reply_token, TextSendMessage("電話番号を入力してください（例：07012345678）"))
+            reply_or_push(user_id, event.reply_token, TextSendMessage("電話番号を入力してください（例：07012345678）"))
             return
         elif pb["step"] == "phone":
             if not re.match(r"^0\d{9,10}$", text):
-                line_bot_api.reply_message(event.reply_token, TextSendMessage("電話番号の形式で入力してください（例：07012345678）"))
+                reply_or_push(user_id, event.reply_token, TextSendMessage("電話番号の形式で入力してください（例：07012345678）"))
                 return
             PENDING_BOOK[user_id]["phone"] = text
             finalize_booking(event.reply_token, user_id)
             return
 
     # デフォルト
-    line_bot_api.reply_message(event.reply_token, TextSendMessage("下のリッチメニュー「予約 / Reserve」を押して開始してください。"))
+    reply_or_push(user_id, event.reply_token, TextSendMessage("下のリッチメニュー「予約 / Reserve」を押して開始してください。"))
 
 # ====== 受付：ポストバック ======
 @handler.add(PostbackEvent)
 def on_postback(event: PostbackEvent):
     user_id = event.source.user_id
-    data = {}
     try:
         data = json.loads(event.postback.data or "{}")
     except Exception:
-        pass
+        data = {}
 
     # 店舗側からの回答（OK/不可）
     if data.get("type") == "store_reply":
@@ -354,13 +347,11 @@ def on_postback(event: PostbackEvent):
         store_id = data.get("store_id")
         req = REQUESTS.get(req_id)
         if not req:
-            return  # 流すだけ
-        # 締切後は完全無視
+            return
         if now_jst() > req["deadline"] or req.get("closed"):
             return
         if status == "ok":
             req["candidates"].add(store_id)
-            # 逐次ユーザーへ候補カード送信
             store = STORE_BY_ID.get(store_id)
             if store:
                 lang = SESS.get(req["user_id"], {}).get("lang", "jp")
@@ -371,11 +362,10 @@ def on_postback(event: PostbackEvent):
                 )
             if len(req["candidates"]) >= 3:
                 req["closed"] = True
-        elif status == "no":
-            pass
         return
 
     step = data.get("step")
+
     if step == "lang":
         v = data.get("v", "jp")
         SESS.setdefault(user_id, {})["lang"] = v
@@ -387,9 +377,16 @@ def on_postback(event: PostbackEvent):
         ask_pax(event.reply_token, SESS[user_id].get("lang", "jp"), user_id)
         return
 
+    # ←← これが “人数を押しても反応しない” の直接対策：reply→push フォールバックで送迎質問を出す
     if step == "pax":
         SESS.setdefault(user_id, {})["pax"] = int(data.get("v", 2))
-        ask_pickup(event.reply_token, SESS[user_id].get("lang", "jp"))
+        ask_pickup(event.reply_token, SESS[user_id].get("lang", "jp"), user_id)
+         return
+
+    # 5+ の分岐（ボタン押下でテキスト入力待ちへ）
+    if step == "pax5plus":
+        SESS.setdefault(user_id, {})["await"] = "pax_number"
+        reply_or_push(user_id, event.reply_token, TextSendMessage("人数を数字で入力してください（例：6）"))
         return
 
     if step == "pickup":
@@ -399,25 +396,23 @@ def on_postback(event: PostbackEvent):
             # 任意でホテル名（入れなくてもOKにする）
             SESS[user_id]["await"] = "hotel_name"
             txt = lang_text(SESS[user_id].get("lang","jp"), "ホテル名をご記入ください（任意）", "Please enter your hotel name (optional)")
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(txt))
+            reply_or_push(user_id, event.reply_token, TextSendMessage(txt))
         else:
-            start_inquiry(event.reply_token, user_id)
+            # 送迎不要ならここで確認画面へ
+            ask_confirm(event.reply_token, user_id)
         return
 
-    if data.get("type") == "book":
-        # 予約申請開始
-        req_id = SESS.get(user_id, {}).get("req_id")
-        if not req_id:
-            # 古い候補でもOKにするため、直近のREQUESTSから user_id で検索して最後のもの
-            # MVPなので簡略化
-            for rid, r in reversed(list(REQUESTS.items())):
-                if r["user_id"] == user_id:
-                    req_id = rid
-                    break
-        store_id = data.get("store_id")
-        PENDING_BOOK[user_id] = {"req_id": req_id, "store_id": store_id, "step": "name"}
-        line_bot_api.reply_message(event.reply_token, TextSendMessage("お名前を入力してください"))
+    # 最終確認 Yes/No
+    if step == "confirm":
+        v = data.get("v", "no")
+        if v == "yes":
+            ask_confirm(event.reply_token, user_id)
+        else:
+            # いいえ → 入力をリセットして言語選択から
+            SESS[user_id] = {}
+            ask_lang(event.reply_token, user_id)
         return
+
 
 # ====== 質問UI ======
 def ask_lang(reply_token, user_id):
