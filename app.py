@@ -3,6 +3,7 @@ from datetime import timedelta, timezone
 from flask import Flask, request, abort
 import csv, io, requests
 import threading
+import unicodedata
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -228,7 +229,30 @@ def webhook():
         return "OK", 200
 
     return "OK"
+# ★ここから追加：起動ワードのゆらぎ吸収ユーティリティ
+def _norm(s: str) -> str:
+    # 全角/半角・大文字小文字・前後空白を吸収
+    return unicodedata.normalize("NFKC", (s or "")).strip().lower()
 
+def is_start_trigger(text: str) -> bool:
+    s = _norm(text)
+    # 単体パターン
+    if s in {
+        "予約をはじめる",
+        "予約する",
+        "start reservation",
+        "reserve",
+        "予約/reserve",
+        "予約する/reserve",
+        "予約 / reserve",
+        "予約する / reserve",
+    }:
+        return True
+    # 日英併記や区切り文字の違いを許容
+    if "予約" in s and ("reserve" in s or "reservation" in s):
+        return True
+    return False
+# ★追加ここまで
 
 # ====== 受付：テキスト ======
 @handler.add(MessageEvent, message=TextMessage)
@@ -269,7 +293,8 @@ def on_text(event: MessageEvent):
         return
 
     # トリガー
-    if text in ["予約をはじめる", "Start reservation"]:
+        # トリガー（表記ゆれ／日英併記「予約する/Reserve」「予約をはじめる Start reservation」に対応）
+    if is_start_trigger(text):
         SESS[user_id] = {}
         ask_lang(event.reply_token)
         return
