@@ -307,7 +307,7 @@ def on_text(event: MessageEvent):
         return
 
     # トリガー（既存のキーワードでOK）
-    if text in ["予約をはじめる", "Start reservation", "予約する", "Reserve", "予約 / Reserve", "予約する/Reserve"]:
+    if is_start_trigger(text):
         SESS[user_id] = {}
         ask_lang(event.reply_token, user_id)
         return
@@ -377,11 +377,10 @@ def on_postback(event: PostbackEvent):
         ask_pax(event.reply_token, SESS[user_id].get("lang", "jp"), user_id)
         return
 
-    # ←← これが “人数を押しても反応しない” の直接対策：reply→push フォールバックで送迎質問を出す
-        if step == "pax":
-            SESS.setdefault(user_id, {})["pax"] = int(data.get("v", 2))
-            ask_pickup(event.reply_token, SESS[user_id].get("lang", "jp"), user_id)
-            return
+    if step == "pax":
+        SESS.setdefault(user_id, {})["pax"] = int(data.get("v", 2))
+        ask_pickup(event.reply_token, SESS[user_id].get("lang", "jp"), user_id)
+        return
 
     # 5+ の分岐（ボタン押下でテキスト入力待ちへ）
     if step == "pax5plus":
