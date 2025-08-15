@@ -6,7 +6,7 @@ import threading
 import unicodedata
 
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
+from linebot.exceptions import LineBotApiError
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, PostbackEvent,
     QuickReply, QuickReplyButton, PostbackAction,
@@ -115,6 +115,32 @@ def admin_reload_stores():
 def admin_stores_preview():
     return {"count": len(STORES), "stores": STORES[:5]}
 
+# 追加ここから（/admin/stores_preview の直後）
+@app.route("/admin/test_push")
+def admin_test_push():
+    token = request.args.get("token","")
+    if token != STORES_RELOAD_TOKEN:
+        return abort(403)
+    uid = request.args.get("uid","").strip()
+    txt = request.args.get("text","TEST: store push ok?")
+    if not uid:
+        return "uid missing", 400
+    ok = safe_push(uid, TextSendMessage(txt), "TEST")
+    return "sent" if ok else "failed"
+
+@app.route("/admin/test_push_all")
+def admin_test_push_all():
+    token = request.args.get("token","")
+    if token != STORES_RELOAD_TOKEN:
+        return abort(403)
+    sent = 0
+    for s in STORES:
+        if safe_push(s["line_user_id"], TextSendMessage(f"TEST to {s['name']}"), s["name"]):
+            sent += 1
+    return f"sent {sent}/{len(STORES)}"
+# 追加ここまで
+
+
 
 # ====== 簡易セッション／リクエスト保持（メモリ） ======
 SESS = {}       # user_id -> {lang,time_iso,pax,pickup,hotel, req_id}
@@ -159,6 +185,20 @@ def reply_or_push(user_id, reply_token, *messages):
                 print("[FALLBACK] reply failed (no user_id)", e)
         except Exception as e2:
             print("[FALLBACK] both failed", e, e2)
+
+# 追加ここから（reply_or_pushの直後に置く）
+def safe_push(uid, message, store_name=""):
+    try:
+        line_bot_api.push_message(uid, message)
+        print(f"[PUSH OK] {store_name} {uid}")
+        return True
+    except LineBotApiError as e:
+        detail = getattr(e, "error", None)
+        print(f"[PUSH NG] {store_name} {uid} status={getattr(e,'status_code',None)} detail={detail}")
+    except Exception as e:
+        print(f"[PUSH NG] {store_name} {uid} err={e}")
+    return False
+# 追加ここまで
 
 # ====== Flex: 候補カード ======
 def candidate_bubble(store, lang="jp"):
@@ -543,13 +583,13 @@ def start_inquiry(reply_token, user_id):
             PostbackAction(label="不可", data=json.dumps(
                 {"type":"store_reply","req_id":req_id,"store_id":s["store_id"],"status":"no"})),
         ]
-        try:
-            line_bot_api.push_message(
-                s["line_user_id"],
-                TextSendMessage(text=text, quick_reply=qreply(actions))
-            )
-        except Exception as e:
-            print("push to store failed:", s["name"], e)
+        
+        safe_push(
+            s["line_user_id"],
+            TextSendMessage(text=text, quick_reply=qreply(actions)),
+            s["name"]
+        )
+
 
     # 15分の締切時に候補0件なら自動通知
     schedule_timeout_notice(req_id)
