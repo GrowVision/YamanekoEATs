@@ -378,10 +378,10 @@ def on_postback(event: PostbackEvent):
         return
 
     # ←← これが “人数を押しても反応しない” の直接対策：reply→push フォールバックで送迎質問を出す
-    if step == "pax":
-        SESS.setdefault(user_id, {})["pax"] = int(data.get("v", 2))
-        ask_pickup(event.reply_token, SESS[user_id].get("lang", "jp"), user_id)
-         return
+        if step == "pax":
+            SESS.setdefault(user_id, {})["pax"] = int(data.get("v", 2))
+            ask_pickup(event.reply_token, SESS[user_id].get("lang", "jp"), user_id)
+            return
 
     # 5+ の分岐（ボタン押下でテキスト入力待ちへ）
     if step == "pax5plus":
@@ -406,9 +406,10 @@ def on_postback(event: PostbackEvent):
     if step == "confirm":
         v = data.get("v", "no")
         if v == "yes":
-            ask_confirm(event.reply_token, user_id)
+            # 確定 → 店舗へ一斉照会を送る
+            start_inquiry(event.reply_token, user_id)
         else:
-            # いいえ → 入力をリセットして言語選択から
+            # いいえ → 入力をリセットして言語選択からやり直し
             SESS[user_id] = {}
             ask_lang(event.reply_token, user_id)
         return
@@ -462,6 +463,35 @@ def ask_pickup(reply_token, lang, user_id):
         TextSendMessage(lang_text(lang, "送迎は必要ですか？", "Need pickup service?"),
                         quick_reply=qreply(actions))
     )
+
+def ask_confirm(reply_token, user_id):
+    sess = SESS.get(user_id, {})
+    lang = sess.get("lang", "jp")
+
+    # 表示用テキストを整形
+    t_str = "-"
+    try:
+        if sess.get("time_iso"):
+            t_str = datetime.datetime.fromisoformat(sess["time_iso"]).astimezone(JST).strftime("%H:%M")
+    except Exception:
+        pass
+    pax = sess.get("pax", "-")
+    pick = "希望" if sess.get("pickup") else "不要"
+    hotel = sess.get("hotel") or "-"
+
+    jp  = f"この内容で照会します。\n時間：{t_str}\n人数：{pax}名\n送迎：{pick}（{hotel}）\nよろしいですか？"
+    en  = f"Send inquiry with:\nTime: {t_str}\nParty: {pax}\nPickup: {'Need' if sess.get('pickup') else 'No'} ({hotel})\nProceed?"
+    text = lang_text(lang, jp, en)
+
+    actions = [
+        PostbackAction(label=lang_text(lang, "はい", "Yes"),
+                       data=json.dumps({"step": "confirm", "v": "yes"})),
+        PostbackAction(label=lang_text(lang, "いいえ", "No"),
+                       data=json.dumps({"step": "confirm", "v": "no"})),
+    ]
+    reply_or_push(user_id, reply_token,
+                  TextSendMessage(text, quick_reply=qreply(actions)))
+
 
 # ====== 照会スタート → 店舗一斉送信 ======
 def start_inquiry(reply_token, user_id):
