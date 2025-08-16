@@ -392,7 +392,6 @@ def on_postback(event: PostbackEvent):
     except Exception:
         data = {}
 
-        # 店舗側からの回答（OK/不可）
     if data.get("type") == "store_reply":
         req_id   = data.get("req_id")
         status   = data.get("status")
@@ -401,16 +400,28 @@ def on_postback(event: PostbackEvent):
 
         req = REQUESTS.get(req_id)
         if not req:
-            # セッションが見つからない場合は静かに終了
             return
 
-        # すでに締切 or クローズ（候補3件など）なら、店舗に案内して終了
+        # ★ガード：このボタンは該当店舗のLINE IDからの操作だけ通す
+        expected_uid = store.get("line_user_id") if store else None
+        if expected_uid and event.source.user_id != expected_uid:
+            # お客さん等が誤って押しても無視（必要なら軽い案内を返してもOK）
+            try:
+                line_bot_api.push_message(
+                    event.source.user_id,
+                    TextSendMessage("このボタンは店舗専用です。お客さま側には操作は不要です。")
+                )
+            except Exception:
+                pass
+            return
+
+        # すでに締切 or クローズなら店舗に案内して終了
         if now_jst() > req["deadline"] or req.get("closed"):
             safe_push(event.source.user_id, TextSendMessage("受付は終了しました（すでにマッチング済みです）。"))
             return
 
         if status == "ok":
-            # 同一店舗の重複OKは無視（先着1回）
+            # 同一店舗の重複OKは1回だけ
             if store_id in req["candidates"]:
                 safe_push(event.source.user_id, TextSendMessage("すでに送信済みです。ありがとうございます。"))
                 return
@@ -427,18 +438,16 @@ def on_postback(event: PostbackEvent):
                 bubble = candidate_bubble(store, lang)
                 line_bot_api.push_message(
                     req["user_id"],
-                    FlexSendMessage(
-                        alt_text="候補が届きました / New option available",
-                        contents=bubble
-                    )
+                    FlexSendMessage(alt_text="候補が届きました / New option available", contents=bubble)
                 )
 
-            # 3件そろったらクローズ（以降のOKは「マッチング済み」案内）
+            # 3件そろったらクローズ
             if len(req["candidates"]) >= 3:
                 req["closed"] = True
 
-        # 「不可」は静かに終了（何もしない）
+        # 「不可」は静かに無視
         return
+
 
     # ここから通常フロー
     step = data.get("step")
@@ -695,6 +704,11 @@ def start_inquiry(reply_token, user_id):
     for s in STORES:
         # 送迎条件フィルタ（必要なら）
         if sess["pickup"] and not s["pickup_ok"]:
+            continue
+
+        # ★ガード：依頼者と同じIDの宛先（= お客さん自身）には送らない
+        if s["line_user_id"] == user_id:
+            print("[WARN] skip self user_id to avoid sending store prompt to the customer")
             continue
 
         # REQは見せない（店舗に不要情報を出さない）
