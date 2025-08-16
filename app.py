@@ -375,9 +375,10 @@ def on_text(event: MessageEvent):
                 reply_or_push(user_id, event.reply_token, TextSendMessage("電話番号の形式で入力してください（例：07012345678）"))
                 return
             PENDING_BOOK[user_id]["phone"] = text
-            # ★ここを変更：いきなり確定せず、最終確認へ
-            ask_book_final_confirm(event.reply_token, user_id)
+            # いきなり確定せず、最終確認へ
+            ask_booking_confirm(event.reply_token, user_id)
             return
+
 
 
     # デフォルト
@@ -447,6 +448,22 @@ def on_postback(event: PostbackEvent):
 
         # 「不可」は静かに無視
         return
+
+        # ★ユーザー：「この店に予約申請」→ 氏名入力へ
+    if data.get("type") == "book":
+        # 直近のリクエストIDを取得
+        req_id = SESS.get(user_id, {}).get("req_id")
+        if not req_id:
+            # 念のため直近のREQUESTSから拾う（古い候補でも動くように）
+            for rid, r in reversed(list(REQUESTS.items())):
+                if r["user_id"] == user_id:
+                    req_id = rid
+                    break
+        store_id = data.get("store_id")
+        PENDING_BOOK[user_id] = {"req_id": req_id, "store_id": store_id, "step": "name"}
+        reply_or_push(user_id, event.reply_token, TextSendMessage("お名前を入力してください"))
+        return
+
 
 
     # ここから通常フロー
