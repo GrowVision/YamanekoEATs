@@ -152,13 +152,26 @@ def now_jst():
     return datetime.datetime.now(JST)
 
 def next_half_hour_slots(n=6):
+    """18:00開始を基本に、かつ '今から45分後以降' を最低条件として30分刻みで n 個返す"""
     t = now_jst()
-    minute = 30 if t.minute < 30 else 60
-    start = t.replace(minute=0, second=0, microsecond=0) + timedelta(minutes=minute)
-    slots = []
-    for i in range(n):
-        slots.append(start + timedelta(minutes=30*i))
+
+    # きょうの 18:00
+    today_18 = t.replace(hour=18, minute=0, second=0, microsecond=0)
+
+    # 今から45分後（送迎などの準備時間）
+    min_time = t + timedelta(minutes=45)
+
+    # 開始時刻は  max(18:00, 今+45分)
+    start_candidate = max(today_18, min_time)
+
+    # :00 / :30 に切り上げ
+    add_min = (30 - (start_candidate.minute % 30)) % 30
+    start = (start_candidate + timedelta(minutes=add_min)).replace(second=0, microsecond=0)
+
+    # 30分刻みで n 個
+    slots = [start + timedelta(minutes=30*i) for i in range(n)]
     return slots
+
 
 def qreply(items):
     return QuickReply(items=[QuickReplyButton(action=a) for a in items])
@@ -239,23 +252,20 @@ def schedule_timeout_notice(req_id: str):
         req = REQUESTS.get(req_id)
         if not req or req.get("closed"):
             return
-        # すでに1件以上あれば何もしない（来た分は逐次提示済み）
         if len(req.get("candidates", set())) == 0:
             lang = SESS.get(req["user_id"], {}).get("lang", "jp")
-            jp = "現在、予約可能な店舗が見つかりませんでした。お手数ですが、時間や人数を変えて再度お試しください。"
-            en = "Currently all full for your request. Please try another time or party size."
+            jp = "現在、すべての登録店舗が満席でした。時間や人数を変えて再度お試しください。"
+            en = "All registered restaurants were full for your request. Please try another time or party size."
             try:
                 line_bot_api.push_message(req["user_id"], TextSendMessage(lang_text(lang, jp, en)))
             except Exception as e:
                 print("timeout notice failed:", e)
-        # いずれにせよクローズ
         req["closed"] = True
 
     def _arm_timer():
         req = REQUESTS.get(req_id)
         if not req or req.get("closed"):
             return
-        # デッドラインまでの秒数
         delay = max(0, int((req["deadline"] - now_jst()).total_seconds()))
         threading.Timer(delay, _notify).start()
 
@@ -382,27 +392,36 @@ def on_postback(event: PostbackEvent):
     except Exception:
         data = {}
 
-    # 店舗側からの回答（OK/不可）
+        # 店舗側からの回答（OK/不可）
     if data.get("type") == "store_reply":
         req_id   = data.get("req_id")
         status   = data.get("status")
         store_id = data.get("store_id")
+        store    = STORE_BY_ID.get(store_id)
 
         req = REQUESTS.get(req_id)
         if not req:
+            # セッションが見つからない場合は静かに終了
             return
-        # 締切後 or クローズ後は完全無視
+
+        # すでに締切 or クローズ（候補3件など）なら、店舗に案内して終了
         if now_jst() > req["deadline"] or req.get("closed"):
+            safe_push(event.source.user_id, TextSendMessage("受付は終了しました（すでにマッチング済みです）。"))
             return
 
         if status == "ok":
-            # ★同一店舗からの重複OKは無視（先に来た1回だけ有効）
+            # 同一店舗の重複OKは無視（先着1回）
             if store_id in req["candidates"]:
+                safe_push(event.source.user_id, TextSendMessage("すでに送信済みです。ありがとうございます。"))
                 return
+
+            # 受付
             req["candidates"].add(store_id)
 
-            # ユーザーへ候補カードを送る
-            store = STORE_BY_ID.get(store_id)
+            # 店舗へ受領メッセージ
+            safe_push(event.source.user_id, TextSendMessage("ありがとうございます。お客様へご案内しました。"))
+
+            # ユーザーへ候補カードを即時送信
             if store:
                 lang = SESS.get(req["user_id"], {}).get("lang", "jp")
                 bubble = candidate_bubble(store, lang)
@@ -413,10 +432,12 @@ def on_postback(event: PostbackEvent):
                         contents=bubble
                     )
                 )
-            # 3件そろったらクローズ
+
+            # 3件そろったらクローズ（以降のOKは「マッチング済み」案内）
             if len(req["candidates"]) >= 3:
                 req["closed"] = True
-        # 「不可」は何もしない
+
+        # 「不可」は静かに終了（何もしない）
         return
 
     # ここから通常フロー
@@ -637,14 +658,11 @@ def ask_booking_confirm(reply_token, user_id):
     reply_or_push(user_id, reply_token,
                   TextSendMessage(lang_text(lang, jp, en), quick_reply=qreply(actions)))
 
-
-
-# ====== 照会スタート → 店舗一斉送信 ======
 def start_inquiry(reply_token, user_id):
     sess = SESS.get(user_id, {})
     lang = sess.get("lang", "jp")
     req_id = make_req_id()
-    deadline = now_jst() + timedelta(minutes=15)
+    deadline = now_jst() + timedelta(minutes=10)  # ← 最大10分
 
     REQUESTS[req_id] = {
         "user_id": user_id,
@@ -655,17 +673,15 @@ def start_inquiry(reply_token, user_id):
         "hotel": sess.get("hotel", ""),
         "candidates": set(),
         "closed": False,
-        # ★この照会に対して既に返信した店舗を記録
-        "replied_by": set(),
     }
     SESS[user_id]["req_id"] = req_id
 
-    # ユーザーに受付メッセージ
+    # ユーザーに受付メッセージ（10分表記）
     line_bot_api.reply_message(
         reply_token,
         TextSendMessage(lang_text(lang,
-            "照会中です。最大15分、候補が届き次第表示します。",
-            "Request sent. We’ll show options as they reply (up to 15 min)."))
+            "照会中です。最大10分、候補が届き次第表示します。",
+            "Request sent. We’ll show options as they reply (up to 10 min)."))
     )
 
     # 店舗に一斉送信（営業フィルタ等はMVPでは省略）
@@ -681,29 +697,27 @@ def start_inquiry(reply_token, user_id):
         if sess["pickup"] and not s["pickup_ok"]:
             continue
 
-        # ★REQは本文に書かない（店舗に不要情報を出さない）
+        # REQは見せない（店舗に不要情報を出さない）
         text = (
             f"【照会】{wanted}／{pax}名／送迎：{pickup_label}（{hotel}）\n"
             f"⏰ 締切：{deadline_str}（あと{remain}分）\n"
             f"押すだけで返信👇"
         )
-
         actions = [
             PostbackAction(label="OK",  data=json.dumps(
                 {"type":"store_reply","req_id":req_id,"store_id":s["store_id"],"status":"ok"})),
             PostbackAction(label="不可", data=json.dumps(
                 {"type":"store_reply","req_id":req_id,"store_id":s["store_id"],"status":"no"})),
         ]
-
-        # pushは失敗理由をログに残す安全版を使用
         safe_push(
             s["line_user_id"],
             TextSendMessage(text=text, quick_reply=qreply(actions)),
             s["name"]
         )
 
-    # 15分の締切時に候補0件なら自動通知
+    # 10分の締切時に候補0件なら自動通知
     schedule_timeout_notice(req_id)
+
 
 
 
