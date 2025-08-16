@@ -362,7 +362,7 @@ def on_text(event: MessageEvent):
         ask_lang(event.reply_token, user_id)
         return
 
-    # 予約フロー：名前・電話
+        # 予約フロー：名前・電話
     if user_id in PENDING_BOOK:
         pb = PENDING_BOOK[user_id]
         if pb["step"] == "name":
@@ -375,8 +375,8 @@ def on_text(event: MessageEvent):
                 reply_or_push(user_id, event.reply_token, TextSendMessage("電話番号の形式で入力してください（例：07012345678）"))
                 return
             PENDING_BOOK[user_id]["phone"] = text
-            # ★予約確定の最終確認を表示（Yes→finalize、No→リセット）
-            ask_booking_confirm(event.reply_token, user_id)
+            # ★ここを変更：いきなり確定せず、最終確認へ
+            ask_book_final_confirm(event.reply_token, user_id)
             return
 
 
