@@ -382,11 +382,12 @@ def on_postback(event: PostbackEvent):
     except Exception:
         data = {}
 
-        # 店舗側からの回答（OK/不可）
-        if data.get("type") == "store_reply":
+    # 店舗側からの回答（OK/不可）
+    if data.get("type") == "store_reply":
         req_id   = data.get("req_id")
         status   = data.get("status")
         store_id = data.get("store_id")
+
         req = REQUESTS.get(req_id)
         if not req:
             return
@@ -394,28 +395,31 @@ def on_postback(event: PostbackEvent):
         if now_jst() > req["deadline"] or req.get("closed"):
             return
 
-        # ★同一店舗からの重複OKは無視（先に来た1回だけ有効）
         if status == "ok":
+            # ★同一店舗からの重複OKは無視（先に来た1回だけ有効）
             if store_id in req["candidates"]:
-                return  # 既に受け付け済みなので何もしない
+                return
             req["candidates"].add(store_id)
 
-            # ユーザーへ候補カードを1回だけ送る
+            # ユーザーへ候補カードを送る
             store = STORE_BY_ID.get(store_id)
             if store:
                 lang = SESS.get(req["user_id"], {}).get("lang", "jp")
                 bubble = candidate_bubble(store, lang)
                 line_bot_api.push_message(
                     req["user_id"],
-                    FlexSendMessage(alt_text="候補が届きました / New option available", contents=bubble)
+                    FlexSendMessage(
+                        alt_text="候補が届きました / New option available",
+                        contents=bubble
+                    )
                 )
+            # 3件そろったらクローズ
             if len(req["candidates"]) >= 3:
                 req["closed"] = True
-
-        # 「不可」は今は何もしない
+        # 「不可」は何もしない
         return
 
-    
+    # ここから通常フロー
     step = data.get("step")
 
     if step == "lang":
@@ -446,14 +450,18 @@ def on_postback(event: PostbackEvent):
         if need:
             # 任意でホテル名（入れなくてもOKにする）
             SESS[user_id]["await"] = "hotel_name"
-            txt = lang_text(SESS[user_id].get("lang","jp"), "ホテル名をご記入ください（任意）", "Please enter your hotel name (optional)")
+            txt = lang_text(
+                SESS[user_id].get("lang","jp"),
+                "ホテル名をご記入ください（任意）",
+                "Please enter your hotel name (optional)"
+            )
             reply_or_push(user_id, event.reply_token, TextSendMessage(txt))
         else:
-            # 送迎不要ならここで確認画面へ
+            # 送迎不要ならここで照会前の確認画面へ
             ask_confirm(event.reply_token, user_id)
         return
 
-    # 最終確認 Yes/No
+    # 照会内容の最終確認 Yes/No（照会送信前）
     if step == "confirm":
         v = data.get("v", "no")
         if v == "yes":
@@ -465,20 +473,16 @@ def on_postback(event: PostbackEvent):
             ask_lang(event.reply_token, user_id)
         return
 
-        # ★予約確定の最終確認 Yes/No（氏名・電話を入れた後の確認）
+    # ★予約確定の最終確認 Yes/No（店舗選択→氏名・電話入力後）
     if step == "book_confirm":
         v = data.get("v", "no")
         if v == "yes":
-            # ここで本当に予約を確定（店舗・ユーザーに最終連絡）
             finalize_booking(event.reply_token, user_id)
         else:
-            # 入力をリセットして最初からやり直し
             SESS[user_id] = {}
             PENDING_BOOK.pop(user_id, None)
             ask_lang(event.reply_token, user_id)
         return
-
-
 
 # ====== 質問UI ======
 def ask_lang(reply_token, user_id):
