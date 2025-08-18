@@ -290,6 +290,52 @@ def schedule_timeout_notice(req_id: str):
 
     _arm_timer()
 
+# --- 15分前リマインド（ユーザー＆店舗）
+def schedule_prearrival_reminder(req_id: str):
+    """予約時刻の15分前に、ユーザーと店舗へ自動リマインド（多重実行防止つき）"""
+    req = REQUESTS.get(req_id)
+    if not req or not req.get("confirmed"):
+        return
+    if req.get("reminder_scheduled"):
+        return
+    req["reminder_scheduled"] = True  # 予約確定時に一度だけ
+
+    def _send():
+        r = REQUESTS.get(req_id)
+        if not r or not r.get("confirmed"):
+            return
+        user_id = r["user_id"]
+        st = STORE_BY_ID.get(r.get("store_id"))
+        if not st:
+            return
+        tstr = datetime.datetime.fromisoformat(r["wanted_iso"]).astimezone(JST).strftime("%H:%M")
+        lang = SESS.get(user_id, {}).get("lang", "jp")
+
+        # ユーザーへ
+        u_msg = lang_text(
+            lang,
+            f"【リマインド】ご予約の15分前です。\n店舗：{st['name']}\n時間：{tstr}／{r['pax']}名\nGoogleマップ：{st['map_url']}",
+            f"[Reminder] Your table is in 15 minutes.\nRestaurant: {st['name']}\nTime: {tstr} / {r['pax']} people\nGoogle Maps: {st['map_url']}",
+        )
+        try:
+            line_bot_api.push_message(user_id, TextSendMessage(u_msg))
+        except Exception as e:
+            print("reminder user push failed:", e)
+
+        # 店舗へ
+        s_msg = f"【リマインド】このあと15分でご予約（{tstr}／{r['pax']}名）です。"
+        try:
+            line_bot_api.push_message(st["line_user_id"], TextSendMessage(s_msg))
+        except Exception as e:
+            print("reminder store push failed:", e)
+
+    # 予約時刻の15分前にタイマー
+    wanted_dt = datetime.datetime.fromisoformat(req["wanted_iso"]).astimezone(JST)
+    fire_at = wanted_dt - timedelta(minutes=15)
+    delay = max(0, int((fire_at - now_jst()).total_seconds()))
+    threading.Timer(delay, _send).start()
+
+
 # ====== Webhook ======
 # /webhook: すべてのHTTPメソッドを許可し、まずログを出す
 @app.route("/webhook", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE", "PATCH"], strict_slashes=False)
@@ -540,15 +586,24 @@ def on_postback(event: PostbackEvent):
         return
 
     # ★予約確定の最終確認 Yes/No（店舗選択→氏名・電話入力後）
-    if step == "book_confirm":
+       if step == "book_confirm":
         v = data.get("v", "no")
+        pb = PENDING_BOOK.get(user_id, {})
+        req = REQUESTS.get(pb.get("req_id"))
         if v == "yes":
+            if req and req.get("confirmed"):
+                reply_or_push(user_id, event.reply_token, TextSendMessage(
+                    lang_text(SESS.get(user_id,{}).get("lang","jp"),
+                              "すでに予約は確定しています。", "Your booking is already confirmed.")
+                ))
+                return
             finalize_booking(event.reply_token, user_id)
         else:
             SESS[user_id] = {}
             PENDING_BOOK.pop(user_id, None)
             ask_lang(event.reply_token, user_id)
         return
+
 
 # ====== 質問UI ======
 def ask_lang(reply_token, user_id):
@@ -703,11 +758,12 @@ def ask_booking_confirm(reply_token, user_id):
     reply_or_push(user_id, reply_token,
                   TextSendMessage(lang_text(lang, jp, en), quick_reply=qreply(actions)))
 
+# ====== 照会スタート → 店舗一斉送信 ======
 def start_inquiry(reply_token, user_id):
     sess = SESS.get(user_id, {})
     lang = sess.get("lang", "jp")
     req_id = make_req_id()
-    deadline = now_jst() + timedelta(minutes=10)  # ← 最大10分
+    deadline = now_jst() + timedelta(minutes=10)  # 最大待ち時間 10分
 
     REQUESTS[req_id] = {
         "user_id": user_id,
@@ -721,7 +777,7 @@ def start_inquiry(reply_token, user_id):
     }
     SESS[user_id]["req_id"] = req_id
 
-    # ユーザーに受付メッセージ（10分表記）
+    # ユーザーへ受付メッセージ
     line_bot_api.reply_message(
         reply_token,
         TextSendMessage(lang_text(lang,
@@ -729,26 +785,26 @@ def start_inquiry(reply_token, user_id):
             "Request sent. We’ll show options as they reply (up to 10 min)."))
     )
 
-    # 店舗に一斉送信（営業フィルタ等はMVPでは省略）
+    # 店舗へ一斉送信
     wanted = datetime.datetime.fromisoformat(sess["time_iso"]).astimezone(JST).strftime("%H:%M")
     pax = sess["pax"]
     pickup_label = "希望" if sess["pickup"] else "不要"
     hotel = sess.get("hotel") or "-"
     deadline_str = deadline.strftime("%H:%M")
     remain = int((deadline - now_jst()).total_seconds() // 60)
+    foreign_hint = " ※外国人（英語）" if lang == "en" else ""
 
     for s in STORES:
-        # 送迎が必要な依頼 かつ 店舗が送迎不可ならスキップ
+        # 送迎が必要な依頼 かつ 店舗が送迎不可なら除外
         if bool(sess.get("pickup")) and not bool(s.get("pickup_ok", False)):
             continue
 
-        # 依頼者本人（=お客さま）への誤送信防止
+        # 誤送信防止（万一店舗LINE＝お客さまのIDだった場合）
         if s["line_user_id"] == user_id:
-            print("[WARN] skip self user_id to avoid sending store prompt to the customer")
             continue
 
         text = (
-            f"【照会】{wanted}／{pax}名／送迎：{pickup_label}（{hotel}）\n"
+            f"【照会】{wanted}／{pax}名／送迎：{pickup_label}（{hotel}）{foreign_hint}\n"
             f"⏰ 締切：{deadline_str}（あと{remain}分）\n"
             f"押すだけで返信👇"
         )
@@ -764,11 +820,8 @@ def start_inquiry(reply_token, user_id):
             s["name"]
         )
 
-
-    # 10分の締切時に候補0件なら自動通知
+    # 10分経って候補0件なら自動通知
     schedule_timeout_notice(req_id)
-
-
 
 
 # ====== 予約確定 ======
@@ -784,10 +837,31 @@ def finalize_booking(reply_token, user_id):
         line_bot_api.reply_message(reply_token, TextSendMessage("予約情報を取得できませんでした。最初からやり直してください。"))
         return
 
+    # ★重要：多重確定のガード（LINEの再送・連打対策）
+    if req.get("confirmed"):
+        try:
+            line_bot_api.reply_message(
+                reply_token,
+                TextSendMessage(lang_text(SESS.get(user_id,{}).get("lang","jp"),
+                    "すでに予約は確定しています。", "Your booking is already confirmed."))
+            )
+        except Exception:
+            pass
+        return
+
+    # まず確定印をつけて以降の重複を遮断
+    req["confirmed"] = True
+    req["store_id"]  = pb["store_id"]
+    req["name"]      = pb["name"]
+    req["phone"]     = pb["phone"]
+    req["closed"]    = True  # 以降の店舗OKは無視
+
     wanted_dt = datetime.datetime.fromisoformat(req["wanted_iso"]).astimezone(JST)
     tstr = wanted_dt.strftime("%H:%M")
     pickup_label = "希望" if req.get("pickup") else "不要"
     hotel = req.get("hotel") or "-"
+    lang_code = SESS.get(user_id, {}).get("lang", "jp")
+    foreign_hint = "\n※外国人のお客様（英語）" if lang_code == "en" else ""
 
     # --- 店舗へ確定連絡（REQなど不要情報は出さない） ---
     store_msg = (
@@ -796,6 +870,7 @@ def finalize_booking(reply_token, user_id):
         f"電話：{pb['phone']}\n"
         f"時間：{tstr}／{req['pax']}名\n"
         f"送迎：{pickup_label}（{hotel}）"
+        f"{foreign_hint}"
     )
     try:
         line_bot_api.push_message(store["line_user_id"], TextSendMessage(store_msg))
@@ -803,9 +878,8 @@ def finalize_booking(reply_token, user_id):
         print("push confirm to store failed:", e)
 
     # --- ユーザーへ確定案内 + キャンセル注意 ---
-    lang = SESS.get(user_id, {}).get("lang", "jp")
     user_msg = lang_text(
-        lang,
+        lang_code,
         f"ご予約が確定しました。\n"
         f"店舗：{store['name']}\n"
         f"時間：{tstr}／{req['pax']}名\n"
@@ -822,24 +896,19 @@ def finalize_booking(reply_token, user_id):
     try:
         line_bot_api.reply_message(reply_token, TextSendMessage(user_msg))
     except Exception as e:
-        # 失敗時はpushでフォールバック
+        # 返信失敗時のみpush（成功時は二重送信しない）
         try:
             line_bot_api.push_message(user_id, TextSendMessage(user_msg))
             print("[FALLBACK] confirm reply→push:", e)
         except Exception as e2:
             print("[FALLBACK] confirm both failed:", e, e2)
 
-    # --- 予約データを保存（15分前リマインドに使う） ---
-    req["confirmed"] = True
-    req["store_id"]  = pb["store_id"]
-    req["name"]      = pb["name"]
-    req["phone"]     = pb["phone"]
-    req["closed"]    = True  # 以降の店舗OKは無視
-
-    # --- 15分前リマインドをセット ---
+    # --- 15分前リマインドをセット（多重防止つき） ---
     schedule_prearrival_reminder(pb["req_id"])
 
-    # --- 後片付け ---
+    # 後片付け
     PENDING_BOOK.pop(user_id, None)
-    # REQUESTS は履歴として残す（必要なら掃除処理で削除）
+
+
+
 
