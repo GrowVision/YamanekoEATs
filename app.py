@@ -305,7 +305,7 @@ def schedule_timeout_notice(req_id: str):
 
     _arm_timer()
 
-# --- 15分前リマインド（ユーザー＆店舗）
+# --- 15分前リマインド（ユーザー＆店舗） ← ここを置き換え
 def schedule_prearrival_reminder(req_id: str):
     """予約時刻の15分前に、ユーザーと店舗へ自動リマインド（多重実行防止つき）"""
     req = REQUESTS.get(req_id)
@@ -319,28 +319,55 @@ def schedule_prearrival_reminder(req_id: str):
         r = REQUESTS.get(req_id)
         if not r or not r.get("confirmed"):
             return
+
         user_id = r["user_id"]
         st = STORE_BY_ID.get(r.get("store_id"))
         if not st:
             return
-        tstr = datetime.datetime.fromisoformat(r["wanted_iso"]).astimezone(JST).strftime("%H:%M")
-        lang = SESS.get(user_id, {}).get("lang", "jp")
 
-        # ユーザーへ
-        u_msg = lang_text(
-            lang,
-            f"【リマインド】ご予約の15分前です。\n店舗：{st['name']}\n時間：{tstr}／{r['pax']}名\nGoogleマップ：{st['map_url']}",
-            f"[Reminder] Your table is in 15 minutes.\nRestaurant: {st['name']}\nTime: {tstr} / {r['pax']} people\nGoogle Maps: {st['map_url']}",
+        # 表示用
+        wanted_dt = datetime.datetime.fromisoformat(r["wanted_iso"]).astimezone(JST)
+        tstr = wanted_dt.strftime("%H:%M")
+        pax  = r["pax"]
+        pick = "希望" if r.get("pickup") else "不要"
+        hotel = r.get("hotel") or "-"
+        lang = SESS.get(user_id, {}).get("lang", "jp")
+        foreign_hint = "（英語）" if lang == "en" else ""
+
+        # ユーザーへ（言語別・送迎も明記）
+        user_msg_jp = (
+            f"【リマインド】このあと15分でご予約です。\n"
+            f"店舗：{st['name']}\n"
+            f"時間：{tstr}／{pax}名\n"
+            f"送迎：{pick}（{hotel}）\n"
+            f"Googleマップ：{st['map_url']}"
+        )
+        user_msg_en = (
+            f"[Reminder] Your table is in 15 minutes.\n"
+            f"Restaurant: {st['name']}\n"
+            f"Time: {tstr} / {pax} people\n"
+            f"Pickup: {'Need' if r.get('pickup') else 'No'} ({hotel})\n"
+            f"Google Maps: {st['map_url']}"
         )
         try:
-            line_bot_api.push_message(user_id, TextSendMessage(u_msg))
+            line_bot_api.push_message(
+                user_id,
+                TextSendMessage(user_msg_jp if lang == "jp" else user_msg_en)
+            )
         except Exception as e:
             print("reminder user push failed:", e)
 
-        # 店舗へ
-        s_msg = f"【リマインド】このあと15分でご予約（{tstr}／{r['pax']}名）です。"
+        # 店舗へ（誰の予約か分かる詳細＋外国人フラグ）
+        store_msg = (
+            "【リマインド】このあと15分でご予約です。\n"
+            f"お名前：{r.get('name','-')}\n"
+            f"電話：{r.get('phone','-')}\n"
+            f"時間：{tstr}／{pax}名\n"
+            f"送迎：{pick}（{hotel}）"
+            + (f"\n※外国人のお客様 {foreign_hint}" if lang == "en" else "")
+        )
         try:
-            line_bot_api.push_message(st["line_user_id"], TextSendMessage(s_msg))
+            line_bot_api.push_message(st["line_user_id"], TextSendMessage(store_msg))
         except Exception as e:
             print("reminder store push failed:", e)
 
@@ -349,7 +376,6 @@ def schedule_prearrival_reminder(req_id: str):
     fire_at = wanted_dt - timedelta(minutes=15)
     delay = max(0, int((fire_at - now_jst()).total_seconds()))
     threading.Timer(delay, _send).start()
-
 
 # ====== Webhook ======
 # /webhook: すべてのHTTPメソッドを許可し、まずログを出す
