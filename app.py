@@ -218,6 +218,21 @@ def reply_or_push(user_id, reply_token, *messages):
         except Exception as e2:
             print("[FALLBACK] both failed", e, e2)
 
+# --- phone helpers (ADD just below reply_or_push) ---
+def _clean_phone(s: str) -> str:
+    # スペース・ハイフン・括弧などを除去（+ と数字だけ残す）
+    return re.sub(r"[^\d\+]", "", (s or "").strip())
+
+def _valid_phone(s: str, lang: str) -> bool:
+    s = _clean_phone(s)
+    if lang == "en":
+        # 国番号つき（+から始まり 6〜15桁）
+        return bool(re.match(r"^\+\d{6,15}$", s))
+    else:
+        # 国内携帯/固定（0 で始まり 10〜11桁）
+        return bool(re.match(r"^0\d{9,10}$", s))
+
+
 # 追加ここから（reply_or_pushの直後に置く）
 def safe_push(uid, message, store_name=""):
     try:
@@ -427,22 +442,49 @@ def on_text(event: MessageEvent):
         ask_lang(event.reply_token, user_id)
         return
 
-        # 予約フロー：名前・電話
-    if user_id in PENDING_BOOK:
-        pb = PENDING_BOOK[user_id]
-        if pb["step"] == "name":
-            PENDING_BOOK[user_id]["name"] = text
-            PENDING_BOOK[user_id]["step"] = "phone"
-            reply_or_push(user_id, event.reply_token, TextSendMessage("電話番号を入力してください（例：07012345678）"))
+    # 予約フロー：名前・電話
+if user_id in PENDING_BOOK:
+    pb = PENDING_BOOK[user_id]
+    lang = SESS.get(user_id, {}).get("lang", "jp")
+
+    if pb["step"] == "name":
+        PENDING_BOOK[user_id]["name"] = (text or "").strip()
+        PENDING_BOOK[user_id]["step"] = "phone"
+
+        if lang == "en":
+            reply_or_push(
+                user_id, event.reply_token,
+                TextSendMessage("Please enter your phone number with country code (e.g., +81 7012345678).")
+            )
+        else:
+            reply_or_push(
+                user_id, event.reply_token,
+                TextSendMessage("電話番号を入力してください（例：07012345678）")
+            )
+        return
+
+    elif pb["step"] == "phone":
+        t = (text or "").strip()
+        if not _valid_phone(t, lang):
+            if lang == "en":
+                reply_or_push(
+                    user_id, event.reply_token,
+                    TextSendMessage("Please enter a valid phone number with country code (e.g., +81 7012345678).")
+                )
+            else:
+                reply_or_push(
+                    user_id, event.reply_token,
+                    TextSendMessage("電話番号の形式で入力してください（例：07012345678）")
+                )
             return
-        elif pb["step"] == "phone":
-            if not re.match(r"^0\d{9,10}$", text):
-                reply_or_push(user_id, event.reply_token, TextSendMessage("電話番号の形式で入力してください（例：07012345678）"))
-                return
-            PENDING_BOOK[user_id]["phone"] = text
-            # いきなり確定せず、最終確認へ
-            ask_booking_confirm(event.reply_token, user_id)
-            return
+
+        # 正規化（+と数字のみ）して保存
+        PENDING_BOOK[user_id]["phone"] = _clean_phone(t)
+
+        # いきなり確定せず、最終予約確認へ（氏名・電話含む内容）
+        ask_booking_confirm(event.reply_token, user_id)
+        return
+
 
 
 
@@ -515,19 +557,25 @@ def on_postback(event: PostbackEvent):
         return
 
         # ★ユーザー：「この店に予約申請」→ 氏名入力へ
-    if data.get("type") == "book":
-        # 直近のリクエストIDを取得
-        req_id = SESS.get(user_id, {}).get("req_id")
-        if not req_id:
-            # 念のため直近のREQUESTSから拾う（古い候補でも動くように）
-            for rid, r in reversed(list(REQUESTS.items())):
-                if r["user_id"] == user_id:
-                    req_id = rid
-                    break
-        store_id = data.get("store_id")
-        PENDING_BOOK[user_id] = {"req_id": req_id, "store_id": store_id, "step": "name"}
-        reply_or_push(user_id, event.reply_token, TextSendMessage("お名前を入力してください"))
-        return
+   if data.get("type") == "book":
+    # 直近のリクエストIDを取得
+    req_id = SESS.get(user_id, {}).get("req_id")
+    if not req_id:
+        # 念のため直近のREQUESTSから拾う（古い候補でも動くように）
+        for rid, r in reversed(list(REQUESTS.items())):
+            if r["user_id"] == user_id:
+                req_id = rid
+                break
+
+    store_id = data.get("store_id")
+    PENDING_BOOK[user_id] = {"req_id": req_id, "store_id": store_id, "step": "name"}
+
+    lang = SESS.get(user_id, {}).get("lang", "jp")
+    msg = ("お名前を入力してください（フルネーム）"
+           if lang == "jp"
+           else "Please enter your full name (alphabet).")
+    reply_or_push(user_id, event.reply_token, TextSendMessage(msg))
+    return
 
 
 
