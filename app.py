@@ -6,7 +6,7 @@ import threading
 import unicodedata
 
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import LineBotApiError
+from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, PostbackEvent,
     QuickReply, QuickReplyButton, PostbackAction,
@@ -586,19 +586,24 @@ def on_postback(event: PostbackEvent):
         return
 
     # ★予約確定の最終確認 Yes/No（店舗選択→氏名・電話入力後）
-       if step == "book_confirm":
+    if step == "book_confirm":
         v = data.get("v", "no")
         pb = PENDING_BOOK.get(user_id, {})
         req = REQUESTS.get(pb.get("req_id"))
         if v == "yes":
+            # 多重確定のガード
             if req and req.get("confirmed"):
-                reply_or_push(user_id, event.reply_token, TextSendMessage(
-                    lang_text(SESS.get(user_id,{}).get("lang","jp"),
-                              "すでに予約は確定しています。", "Your booking is already confirmed.")
-                ))
+                reply_or_push(
+                    user_id, event.reply_token,
+                    TextSendMessage(
+                        lang_text(SESS.get(user_id,{}).get("lang","jp"),
+                                  "すでに予約は確定しています。", "Your booking is already confirmed.")
+                    )
+                )
                 return
             finalize_booking(event.reply_token, user_id)
         else:
+            # やり直し
             SESS[user_id] = {}
             PENDING_BOOK.pop(user_id, None)
             ask_lang(event.reply_token, user_id)
