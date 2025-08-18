@@ -401,7 +401,6 @@ def is_start_trigger(text: str) -> bool:
     return False
 # ★追加ここまで
 
-# ====== 受付：テキスト ======
 @handler.add(MessageEvent, message=TextMessage)
 def on_text(event: MessageEvent):
     user_id = event.source.user_id
@@ -412,12 +411,13 @@ def on_text(event: MessageEvent):
     if m:
         store_name = m.group(1).strip() or "未入力"
         print(f"[STORE_REG] {store_name}: {user_id}")
-        reply_or_push(user_id, event.reply_token,
+        reply_or_push(
+            user_id, event.reply_token,
             TextSendMessage(f"店舗登録OK：{store_name}\nこのIDを運営に送ってください：\n{user_id}")
         )
         return
 
-    # --- 5+ の数値入力を待っている場合 ---
+    # 5+ の数値入力待ち
     if SESS.get(user_id, {}).get("await") == "pax_number":
         m = re.match(r"^\d{1,2}$", text)
         if not m:
@@ -425,71 +425,66 @@ def on_text(event: MessageEvent):
             return
         SESS[user_id]["pax"] = int(text)
         SESS[user_id].pop("await", None)
-        # 次へ（送迎）
         ask_pickup(event.reply_token, SESS[user_id]["lang"], user_id)
         return
 
-    # --- ホテル名入力を待っている場合（任意） → 入力後に確認画面へ ---
+    # ホテル名入力待ち（任意）→ 入力後に照会前の確認へ
     if SESS.get(user_id, {}).get("await") == "hotel_name":
         SESS[user_id]["hotel"] = text
         SESS[user_id].pop("await", None)
         ask_confirm(event.reply_token, user_id)
         return
 
-    # トリガー（既存のキーワードでOK）
+    # 起動ワード
     if is_start_trigger(text):
         SESS[user_id] = {}
         ask_lang(event.reply_token, user_id)
         return
 
-    # 予約フロー：名前・電話
-if user_id in PENDING_BOOK:
-    pb = PENDING_BOOK[user_id]
-    lang = SESS.get(user_id, {}).get("lang", "jp")
+    # 予約フロー：氏名→電話（★このブロックが関数の外に出ていたのがバグ）
+    if user_id in PENDING_BOOK:
+        pb = PENDING_BOOK[user_id]
+        lang = SESS.get(user_id, {}).get("lang", "jp")
 
-    if pb["step"] == "name":
-        PENDING_BOOK[user_id]["name"] = (text or "").strip()
-        PENDING_BOOK[user_id]["step"] = "phone"
-
-        if lang == "en":
-            reply_or_push(
-                user_id, event.reply_token,
-                TextSendMessage("Please enter your phone number with country code (e.g., +81 7012345678).")
-            )
-        else:
-            reply_or_push(
-                user_id, event.reply_token,
-                TextSendMessage("電話番号を入力してください（例：07012345678）")
-            )
-        return
-
-    elif pb["step"] == "phone":
-        t = (text or "").strip()
-        if not _valid_phone(t, lang):
+        if pb["step"] == "name":
+            PENDING_BOOK[user_id]["name"] = (text or "").strip()
+            PENDING_BOOK[user_id]["step"] = "phone"
             if lang == "en":
                 reply_or_push(
                     user_id, event.reply_token,
-                    TextSendMessage("Please enter a valid phone number with country code (e.g., +81 7012345678).")
+                    TextSendMessage("Please enter your phone number with country code (e.g., +81 7012345678).")
                 )
             else:
                 reply_or_push(
                     user_id, event.reply_token,
-                    TextSendMessage("電話番号の形式で入力してください（例：07012345678）")
+                    TextSendMessage("電話番号を入力してください（例：07012345678）")
                 )
             return
 
-        # 正規化（+と数字のみ）して保存
-        PENDING_BOOK[user_id]["phone"] = _clean_phone(t)
+        elif pb["step"] == "phone":
+            t = (text or "").strip()
+            if not _valid_phone(t, lang):
+                if lang == "en":
+                    reply_or_push(
+                        user_id, event.reply_token,
+                        TextSendMessage("Please enter a valid phone number with country code (e.g., +81 7012345678).")
+                    )
+                else:
+                    reply_or_push(
+                        user_id, event.reply_token,
+                        TextSendMessage("電話番号の形式で入力してください（例：07012345678）")
+                    )
+                return
+            PENDING_BOOK[user_id]["phone"] = _clean_phone(t)
+            # 氏名・電話まで揃ったので最終予約確認へ
+            ask_booking_confirm(event.reply_token, user_id)
+            return
 
-        # いきなり確定せず、最終予約確認へ（氏名・電話含む内容）
-        ask_booking_confirm(event.reply_token, user_id)
-        return
-
-
-
-
-    # デフォルト
-    reply_or_push(user_id, event.reply_token, TextSendMessage("下のリッチメニュー「予約 / Reserve」を押して開始してください。"))
+    # デフォルト応答
+    reply_or_push(
+        user_id, event.reply_token,
+        TextSendMessage("下のリッチメニュー「予約 / Reserve」を押して開始してください。")
+    )
 
 # ====== 受付：ポストバック ======
 @handler.add(PostbackEvent)
@@ -500,47 +495,38 @@ def on_postback(event: PostbackEvent):
     except Exception:
         data = {}
 
+    # --- 店舗側からの回答（OK/不可）
     if data.get("type") == "store_reply":
         req_id   = data.get("req_id")
         status   = data.get("status")
         store_id = data.get("store_id")
         store    = STORE_BY_ID.get(store_id)
-
-        req = REQUESTS.get(req_id)
+        req      = REQUESTS.get(req_id)
         if not req:
             return
 
-        # ★ガード：このボタンは該当店舗のLINE IDからの操作だけ通す
+        # このボタンは該当店舗のLINE IDのみ有効
         expected_uid = store.get("line_user_id") if store else None
         if expected_uid and event.source.user_id != expected_uid:
-            # お客さん等が誤って押しても無視（必要なら軽い案内を返してもOK）
-            try:
-                line_bot_api.push_message(
-                    event.source.user_id,
-                    TextSendMessage("このボタンは店舗専用です。お客さま側には操作は不要です。")
-                )
-            except Exception:
-                pass
+            # 店舗以外が押したら無視
             return
 
-        # すでに締切 or クローズなら店舗に案内して終了
+        # 受付終了 or クローズ
         if now_jst() > req["deadline"] or req.get("closed"):
             safe_push(event.source.user_id, TextSendMessage("受付は終了しました（すでにマッチング済みです）。"))
             return
 
         if status == "ok":
-            # 同一店舗の重複OKは1回だけ
+            # 同一店舗の重複は1回だけ
             if store_id in req["candidates"]:
                 safe_push(event.source.user_id, TextSendMessage("すでに送信済みです。ありがとうございます。"))
                 return
 
-            # 受付
             req["candidates"].add(store_id)
-
             # 店舗へ受領メッセージ
             safe_push(event.source.user_id, TextSendMessage("ありがとうございます。お客様へご案内しました。"))
 
-            # ユーザーへ候補カードを即時送信
+            # ユーザーへ候補カード
             if store:
                 lang = SESS.get(req["user_id"], {}).get("lang", "jp")
                 bubble = candidate_bubble(store, lang)
@@ -549,37 +535,33 @@ def on_postback(event: PostbackEvent):
                     FlexSendMessage(alt_text="候補が届きました / New option available", contents=bubble)
                 )
 
-            # 3件そろったらクローズ
+            # 3件集まったらクローズ
             if len(req["candidates"]) >= 3:
                 req["closed"] = True
-
         # 「不可」は静かに無視
         return
 
-        # ★ユーザー：「この店に予約申請」→ 氏名入力へ
-   if data.get("type") == "book":
-    # 直近のリクエストIDを取得
-    req_id = SESS.get(user_id, {}).get("req_id")
-    if not req_id:
-        # 念のため直近のREQUESTSから拾う（古い候補でも動くように）
-        for rid, r in reversed(list(REQUESTS.items())):
-            if r["user_id"] == user_id:
-                req_id = rid
-                break
+    # --- ユーザー：「この店に予約申請」→ 氏名入力へ
+    if data.get("type") == "book":
+        # 直近のリクエストIDを取得（なければ直近のREQUESTSから拾う）
+        req_id = SESS.get(user_id, {}).get("req_id")
+        if not req_id:
+            for rid, r in reversed(list(REQUESTS.items())):
+                if r["user_id"] == user_id:
+                    req_id = rid
+                    break
 
-    store_id = data.get("store_id")
-    PENDING_BOOK[user_id] = {"req_id": req_id, "store_id": store_id, "step": "name"}
+        store_id = data.get("store_id")
+        PENDING_BOOK[user_id] = {"req_id": req_id, "store_id": store_id, "step": "name"}
 
-    lang = SESS.get(user_id, {}).get("lang", "jp")
-    msg = ("お名前を入力してください（フルネーム）"
-           if lang == "jp"
-           else "Please enter your full name (alphabet).")
-    reply_or_push(user_id, event.reply_token, TextSendMessage(msg))
-    return
+        lang = SESS.get(user_id, {}).get("lang", "jp")
+        msg = ("お名前を入力してください（フルネーム）"
+               if lang == "jp"
+               else "Please enter your full name (alphabet).")
+        reply_or_push(user_id, event.reply_token, TextSendMessage(msg))
+        return
 
-
-
-    # ここから通常フロー
+    # --- 通常のステップ処理 ---
     step = data.get("step")
 
     if step == "lang":
@@ -598,17 +580,15 @@ def on_postback(event: PostbackEvent):
         ask_pickup(event.reply_token, SESS[user_id].get("lang", "jp"), user_id)
         return
 
-    # 5+ の分岐（ボタン押下でテキスト入力待ちへ）
     if step == "pax5plus":
         SESS.setdefault(user_id, {})["await"] = "pax_number"
         reply_or_push(user_id, event.reply_token, TextSendMessage("人数を数字で入力してください（例：6）"))
         return
 
     if step == "pickup":
-        need = data.get("need")  # true/false
+        need = data.get("need")
         SESS.setdefault(user_id, {})["pickup"] = bool(need)
         if need:
-            # 任意でホテル名（入れなくてもOKにする）
             SESS[user_id]["await"] = "hotel_name"
             txt = lang_text(
                 SESS[user_id].get("lang","jp"),
@@ -617,29 +597,25 @@ def on_postback(event: PostbackEvent):
             )
             reply_or_push(user_id, event.reply_token, TextSendMessage(txt))
         else:
-            # 送迎不要ならここで照会前の確認画面へ
             ask_confirm(event.reply_token, user_id)
         return
 
-    # 照会内容の最終確認 Yes/No（照会送信前）
+    # 照会内容の最終確認（照会送信前）
     if step == "confirm":
         v = data.get("v", "no")
         if v == "yes":
-            # 確定 → 店舗へ一斉照会を送る
             start_inquiry(event.reply_token, user_id)
         else:
-            # いいえ → 入力をリセットして言語選択からやり直し
             SESS[user_id] = {}
             ask_lang(event.reply_token, user_id)
         return
 
-    # ★予約確定の最終確認 Yes/No（店舗選択→氏名・電話入力後）
+    # 予約確定の最終確認（店舗選択→氏名・電話入力後）
     if step == "book_confirm":
         v = data.get("v", "no")
         pb = PENDING_BOOK.get(user_id, {})
         req = REQUESTS.get(pb.get("req_id"))
         if v == "yes":
-            # 多重確定のガード
             if req and req.get("confirmed"):
                 reply_or_push(
                     user_id, event.reply_token,
@@ -651,12 +627,10 @@ def on_postback(event: PostbackEvent):
                 return
             finalize_booking(event.reply_token, user_id)
         else:
-            # やり直し
             SESS[user_id] = {}
             PENDING_BOOK.pop(user_id, None)
             ask_lang(event.reply_token, user_id)
         return
-
 
 # ====== 質問UI ======
 def ask_lang(reply_token, user_id):
