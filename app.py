@@ -52,25 +52,43 @@ STORE_BY_ID = {s["store_id"]: s for s in STORES}
 STORES_SHEET_CSV_URL = os.getenv("STORES_SHEET_CSV_URL")
 STORES_RELOAD_TOKEN = os.getenv("STORES_RELOAD_TOKEN", "")
 
+# 置換：pickup_ok を robust に解釈する
 def _parse_bool(v):
-    return str(v).strip().lower() in ("1","true","yes","y","on","はい","有","可能","ok")
+    s = str(v).strip().lower()
+    # True グループ
+    if s in {"1","true","t","yes","y","on","ok","〇","○","可","はい","有","可能"}:
+        return True
+    # False グループ
+    if s in {"0","false","f","no","n","off","ng","×","✕","✖","不可","いいえ","無",""}:
+        return False
+    # 不明は False 扱い（必要ならログに出す）
+    return False
 
 def _load_stores_from_csv(url: str):
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
     f = io.StringIO(resp.text)
     reader = csv.DictReader(f)
+
     stores = []
-    for row in reader:
+    # 行番号を出すため enumerate（ヘッダ行は1行目なので実データは2行目から）
+    for row_idx, row in enumerate(reader, start=2):
         sid = (row.get("store_id") or "").strip()
         name = (row.get("name") or "").strip()
         profile = (row.get("profile") or "").strip()
         map_url = (row.get("map_url") or "").strip()
-        pickup_ok = _parse_bool(row.get("pickup_ok"))
+        pickup_ok_raw = row.get("pickup_ok")
+        pickup_ok = _parse_bool(pickup_ok_raw)
         line_user_id = (row.get("line_user_id") or "").strip()
+
         # 必須: store_id, name, line_user_id
         if not sid or not name or not line_user_id:
+            print(f"[STORES][SKIP] row={row_idx} sid='{sid}' name='{name}' line_user_id='{line_user_id}'  ※必須列欠落")
             continue
+
+        # ★ここがあなたのデバッグ行（行番号も出すようにした版）
+        print(f"[STORES] row={row_idx} sid={sid} name={name} pickup_ok_raw={pickup_ok_raw!r} -> {pickup_ok}")
+
         stores.append({
             "store_id": sid,
             "name": name,
@@ -80,6 +98,7 @@ def _load_stores_from_csv(url: str):
             "line_user_id": line_user_id
         })
     return stores
+
 
 def refresh_stores():
     """環境変数のCSV URLがあれば、STORES/STORE_BY_IDを上書き"""
@@ -719,16 +738,15 @@ def start_inquiry(reply_token, user_id):
     remain = int((deadline - now_jst()).total_seconds() // 60)
 
     for s in STORES:
-        # 送迎条件フィルタ（必要なら）
-        if sess["pickup"] and not s["pickup_ok"]:
+        # 送迎が必要な依頼 かつ 店舗が送迎不可ならスキップ
+        if bool(sess.get("pickup")) and not bool(s.get("pickup_ok", False)):
             continue
 
-        # ★ガード：依頼者と同じIDの宛先（= お客さん自身）には送らない
+        # 依頼者本人（=お客さま）への誤送信防止
         if s["line_user_id"] == user_id:
             print("[WARN] skip self user_id to avoid sending store prompt to the customer")
             continue
 
-        # REQは見せない（店舗に不要情報を出さない）
         text = (
             f"【照会】{wanted}／{pax}名／送迎：{pickup_label}（{hotel}）\n"
             f"⏰ 締切：{deadline_str}（あと{remain}分）\n"
@@ -746,6 +764,7 @@ def start_inquiry(reply_token, user_id):
             s["name"]
         )
 
+
     # 10分の締切時に候補0件なら自動通知
     schedule_timeout_notice(req_id)
 
@@ -758,41 +777,69 @@ def finalize_booking(reply_token, user_id):
     if not pb:
         line_bot_api.reply_message(reply_token, TextSendMessage("セッションが見つかりませんでした。最初からやり直してください。"))
         return
+
     req = REQUESTS.get(pb["req_id"])
     store = STORE_BY_ID.get(pb["store_id"])
     if not req or not store:
         line_bot_api.reply_message(reply_token, TextSendMessage("予約情報を取得できませんでした。最初からやり直してください。"))
         return
 
-    # 店舗へ確定通知
-    wanted = datetime.datetime.fromisoformat(req["wanted_iso"]).astimezone(JST).strftime("%H:%M")
-    pickup_label = "希望" if req["pickup"] else "不要"
+    wanted_dt = datetime.datetime.fromisoformat(req["wanted_iso"]).astimezone(JST)
+    tstr = wanted_dt.strftime("%H:%M")
+    pickup_label = "希望" if req.get("pickup") else "不要"
     hotel = req.get("hotel") or "-"
-    msg = f"【予約確定】\nお名前：{pb['name']}\n電話：{pb['phone']}\n" \
-          f"希望：{wanted}／{req['pax']}名／送迎：{pickup_label}（{hotel}）"
-    try:
-        line_bot_api.push_message(store["line_user_id"], TextSendMessage(msg))
-    except Exception as e:
-        print("push confirm failed:", e)
 
-    # ユーザーへ確定案内
-    lang = SESS.get(user_id, {}).get("lang", "jp")
-    user_msg = lang_text(lang,
-        f"ご予約が確定しました。キャンセルはお電話のみでお願いします。\nGoogleマップ：{store['map_url']}",
-        f"Your booking is confirmed. For cancellation, please call the restaurant directly.\nGoogle Maps: {store['map_url']}"
+    # --- 店舗へ確定連絡（REQなど不要情報は出さない） ---
+    store_msg = (
+        f"【予約確定】\n"
+        f"お名前：{pb['name']}\n"
+        f"電話：{pb['phone']}\n"
+        f"時間：{tstr}／{req['pax']}名\n"
+        f"送迎：{pickup_label}（{hotel}）"
     )
-    line_bot_api.reply_message(reply_token, TextSendMessage(user_msg))
+    try:
+        line_bot_api.push_message(store["line_user_id"], TextSendMessage(store_msg))
+    except Exception as e:
+        print("push confirm to store failed:", e)
 
-    # 後片付け（MVP）
+    # --- ユーザーへ確定案内 + キャンセル注意 ---
+    lang = SESS.get(user_id, {}).get("lang", "jp")
+    user_msg = lang_text(
+        lang,
+        f"ご予約が確定しました。\n"
+        f"店舗：{store['name']}\n"
+        f"時間：{tstr}／{req['pax']}名\n"
+        f"送迎：{pickup_label}（{hotel}）\n"
+        f"キャンセルは必ずお電話でお願いします。\n"
+        f"Googleマップ：{store['map_url']}",
+        f"Your booking is confirmed.\n"
+        f"Restaurant: {store['name']}\n"
+        f"Time: {tstr} / {req['pax']} people\n"
+        f"Pickup: {'Need' if req.get('pickup') else 'No'} ({hotel})\n"
+        f"For cancellation, please call the restaurant.\n"
+        f"Google Maps: {store['map_url']}"
+    )
+    try:
+        line_bot_api.reply_message(reply_token, TextSendMessage(user_msg))
+    except Exception as e:
+        # 失敗時はpushでフォールバック
+        try:
+            line_bot_api.push_message(user_id, TextSendMessage(user_msg))
+            print("[FALLBACK] confirm reply→push:", e)
+        except Exception as e2:
+            print("[FALLBACK] confirm both failed:", e, e2)
+
+    # --- 予約データを保存（15分前リマインドに使う） ---
+    req["confirmed"] = True
+    req["store_id"]  = pb["store_id"]
+    req["name"]      = pb["name"]
+    req["phone"]     = pb["phone"]
+    req["closed"]    = True  # 以降の店舗OKは無視
+
+    # --- 15分前リマインドをセット ---
+    schedule_prearrival_reminder(pb["req_id"])
+
+    # --- 後片付け ---
     PENDING_BOOK.pop(user_id, None)
-    # REQUESTS は残してもOK。軽量運用なら削除してもよい。
-    # REQUESTS.pop(pb["req_id"], None)
-
-@app.route("/health")
-def health():
-    return "ok"
-
-@app.route("/")
-def index():
-    return "yamanekoEATS bot running"
+    # REQUESTS は履歴として残す（必要なら掃除処理で削除）
 
