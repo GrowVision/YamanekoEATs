@@ -198,6 +198,11 @@ def qreply(items):
 def lang_text(lang, jp, en):
     return jp if lang == "jp" else en
 
+def bi(jp: str, en: str) -> str:
+    """日本語 + 英語を1通にまとめる（改行区切り）"""
+    return f"{jp}\n{en}"
+
+
 def make_req_id():
     return "REQ-" + now_jst().strftime("%Y%m%d-%H%M%S")
 
@@ -591,40 +596,25 @@ def on_postback(event: PostbackEvent):
     step = data.get("step")
 
     if step == "lang":
-        v = data.get("v", "jp")
-        SESS.setdefault(user_id, {})["lang"] = v
-        ask_time(event.reply_token, v, user_id)
+    v = data.get("v", "jp")
+    SESS.setdefault(user_id, {})["lang"] = v
+
+    state = service_window_state()
+    if state == "before16":
+        jp = "ただいま準備中のため、予約受付は16:00からです。16:00以降にお試しください。"
+        en = "We're preparing for service. Reservations open at 16:00. Please try again after 16:00."
+        reply_or_push(user_id, event.reply_token, TextSendMessage(bi(jp, en)))
+        return
+    if state == "after22":
+        jp = "本日の予約受付は終了しました。22:00以降は、明日以降の日時でご予約ください。"
+        en = "Today's reservation window has closed. After 22:00, please book for tomorrow or a later date."
+        reply_or_push(user_id, event.reply_token, TextSendMessage(bi(jp, en)))
         return
 
-    if step == "time":
-        SESS.setdefault(user_id, {})["time_iso"] = data.get("iso")
-        ask_pax(event.reply_token, SESS[user_id].get("lang", "jp"), user_id)
-        return
+    # 営業時間内 → 時間選択へ
+    ask_time(event.reply_token, v, user_id)
+    return
 
-    if step == "pax":
-        SESS.setdefault(user_id, {})["pax"] = int(data.get("v", 2))
-        ask_pickup(event.reply_token, SESS[user_id].get("lang", "jp"), user_id)
-        return
-
-    if step == "pax5plus":
-        SESS.setdefault(user_id, {})["await"] = "pax_number"
-        reply_or_push(user_id, event.reply_token, TextSendMessage("人数を数字で入力してください（例：6）"))
-        return
-
-    if step == "pickup":
-        need = data.get("need")
-        SESS.setdefault(user_id, {})["pickup"] = bool(need)
-        if need:
-            SESS[user_id]["await"] = "hotel_name"
-            txt = lang_text(
-                SESS[user_id].get("lang","jp"),
-                "ホテル名をご記入ください（任意）",
-                "Please enter your hotel name (optional)"
-            )
-            reply_or_push(user_id, event.reply_token, TextSendMessage(txt))
-        else:
-            ask_confirm(event.reply_token, user_id)
-        return
 
     # 照会内容の最終確認（照会送信前）
     if step == "confirm":
@@ -669,99 +659,41 @@ def ask_lang(reply_token, user_id):
         TextSendMessage("言語を選んでください / Choose your language",
                         quick_reply=qreply(actions))
     )
-
+    
 def ask_time(reply_token, lang, user_id):
-    slots = next_half_hour_slots(6)
-    actions = []
-    for s in slots:
-        label = s.strftime("%H:%M")
-        actions.append(PostbackAction(label=label, data=json.dumps({"step":"time","iso":s.isoformat()})))
+    # まずは営業時間チェック（保険）
+    state = service_window_state()
+    if state == "before16":
+        jp = "ただいま準備中のため、予約受付は16:00からです。16:00以降にお試しください。"
+        en = "We're preparing for service. Reservations open at 16:00. Please try again after 16:00."
+        reply_or_push(user_id, reply_token, TextSendMessage(bi(jp, en)))
+        return
+    if state == "after22":
+        jp = "本日の予約受付は終了しました。22:00以降は、明日以降の日時でご予約ください。"
+        en = "Today's reservation window has closed. After 22:00, please book for tomorrow or a later date."
+        reply_or_push(user_id, reply_token, TextSendMessage(bi(jp, en)))
+        return
+
+    # 18:00〜22:00・かつ「今から45分後以降」の30分刻み候補のみ
+    slots = next_half_hour_slots(8)
+    if not slots:
+        jp = "本日のご案内は終了しました。明日以降のご予約をお願いします。"
+        en = "There are no more available times today. Please book for tomorrow or later."
+        reply_or_push(user_id, reply_token, TextSendMessage(bi(jp, en)))
+        return
+
+    actions = [
+        PostbackAction(label=s.strftime("%H:%M"),
+                       data=json.dumps({"step":"time","iso":s.isoformat()}))
+        for s in slots
+    ]
+    # 見出しも日英併記に
+    jp = "ご希望の時間を選んでください（18:00〜22:00）"
+    en = "Please choose a time between 18:00 and 22:00."
     reply_or_push(
         user_id, reply_token,
-        TextSendMessage(lang_text(lang, "ご希望の時間を選んでください", "Choose your time"),
-                        quick_reply=qreply(actions))
+        TextSendMessage(bi(jp, en), quick_reply=qreply(actions))
     )
-
-def ask_pax(reply_token, lang, user_id):
-    actions = [
-        PostbackAction(label="1",  data=json.dumps({"step":"pax","v":1})),
-        PostbackAction(label="2",  data=json.dumps({"step":"pax","v":2})),
-        PostbackAction(label="3",  data=json.dumps({"step":"pax","v":3})),
-        PostbackAction(label="4",  data=json.dumps({"step":"pax","v":4})),
-        PostbackAction(label="5+", data=json.dumps({"step":"pax5plus"})),
-    ]
-    reply_or_push(
-        user_id, reply_token,
-        TextSendMessage(lang_text(lang, "人数を選んでください", "Select number of people"),
-                        quick_reply=qreply(actions))
-    )
-
-def ask_pickup(reply_token, lang, user_id):
-    actions = [
-        PostbackAction(label=lang_text(lang, "必要", "Need"), data=json.dumps({"step":"pickup","need":True})),
-        PostbackAction(label=lang_text(lang, "不要", "No"),   data=json.dumps({"step":"pickup","need":False})),
-    ]
-    reply_or_push(
-        user_id, reply_token,
-        TextSendMessage(lang_text(lang, "送迎は必要ですか？", "Need pickup service?"),
-                        quick_reply=qreply(actions))
-    )
-
-def ask_confirm(reply_token, user_id):
-    sess = SESS.get(user_id, {})
-    lang = sess.get("lang", "jp")
-
-    # 表示用テキストを整形
-    t_str = "-"
-    try:
-        if sess.get("time_iso"):
-            t_str = datetime.datetime.fromisoformat(sess["time_iso"]).astimezone(JST).strftime("%H:%M")
-    except Exception:
-        pass
-    pax = sess.get("pax", "-")
-    pick = "希望" if sess.get("pickup") else "不要"
-    hotel = sess.get("hotel") or "-"
-
-    jp  = f"この内容で照会します。\n時間：{t_str}\n人数：{pax}名\n送迎：{pick}（{hotel}）\nよろしいですか？"
-    en  = f"Send inquiry with:\nTime: {t_str}\nParty: {pax}\nPickup: {'Need' if sess.get('pickup') else 'No'} ({hotel})\nProceed?"
-    text = lang_text(lang, jp, en)
-
-    actions = [
-        PostbackAction(label=lang_text(lang, "はい", "Yes"),
-                       data=json.dumps({"step": "confirm", "v": "yes"})),
-        PostbackAction(label=lang_text(lang, "いいえ", "No"),
-                       data=json.dumps({"step": "confirm", "v": "no"})),
-    ]
-    reply_or_push(user_id, reply_token,
-                  TextSendMessage(text, quick_reply=qreply(actions)))
-
-def ask_confirm(reply_token, user_id):
-    sess = SESS.get(user_id, {})
-    lang = sess.get("lang", "jp")
-
-    # 表示用テキストを整形
-    t_str = "-"
-    try:
-        if sess.get("time_iso"):
-            t_str = datetime.datetime.fromisoformat(sess["time_iso"]).astimezone(JST).strftime("%H:%M")
-    except Exception:
-        pass
-    pax = sess.get("pax", "-")
-    pick = "希望" if sess.get("pickup") else "不要"
-    hotel = sess.get("hotel") or "-"
-
-    jp  = f"この内容で照会します。\n時間：{t_str}\n人数：{pax}名\n送迎：{pick}（{hotel}）\nよろしいですか？"
-    en  = f"Send inquiry with:\nTime: {t_str}\nParty: {pax}\nPickup: {'Need' if sess.get('pickup') else 'No'} ({hotel})\nProceed?"
-    text = lang_text(lang, jp, en)
-
-    actions = [
-        PostbackAction(label=lang_text(lang, "はい", "Yes"),
-                       data=json.dumps({"step": "confirm", "v": "yes"})),
-        PostbackAction(label=lang_text(lang, "いいえ", "No"),
-                       data=json.dumps({"step": "confirm", "v": "no"})),
-    ]
-    reply_or_push(user_id, reply_token,
-                  TextSendMessage(text, quick_reply=qreply(actions)))
 
 # ★ここから新規追加：予約確定の最終確認（店舗を選んで氏名・電話を入れた後）
 def ask_booking_confirm(reply_token, user_id):
