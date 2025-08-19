@@ -223,6 +223,24 @@ def reply_or_push(user_id, reply_token, *messages):
         except Exception as e2:
             print("[FALLBACK] both failed", e, e2)
 
+def service_window_state(now: datetime.datetime | None = None) -> str:
+    """
+    受付時間の状態を返す:
+      - "before16" … 16:00 前（受付前）
+      - "inside"   … 16:00〜22:00（受付中）
+      - "after22"  … 22:00 以降（受付終了）
+    """
+    now = now or now_jst()
+    now = now.astimezone(JST)
+    start = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    end   = now.replace(hour=22, minute=0, second=0, microsecond=0)
+    if now < start:
+        return "before16"
+    if now >= end:
+        return "after22"
+    return "inside"
+
+
 # --- phone helpers (ADD just below reply_or_push) ---
 def _clean_phone(s: str) -> str:
     # スペース・ハイフン・括弧などを除去（+ と数字だけ残す）
@@ -596,24 +614,26 @@ def on_postback(event: PostbackEvent):
     step = data.get("step")
 
     if step == "lang":
-    v = data.get("v", "jp")
-    SESS.setdefault(user_id, {})["lang"] = v
+        v = data.get("v", "jp")
+        SESS.setdefault(user_id, {})["lang"] = v
 
-    state = service_window_state()
-    if state == "before16":
-        jp = "ただいま準備中のため、予約受付は16:00からです。16:00以降にお試しください。"
-        en = "We're preparing for service. Reservations open at 16:00. Please try again after 16:00."
-        reply_or_push(user_id, event.reply_token, TextSendMessage(bi(jp, en)))
-        return
-    if state == "after22":
-        jp = "本日の予約受付は終了しました。22:00以降は、明日以降の日時でご予約ください。"
-        en = "Today's reservation window has closed. After 22:00, please book for tomorrow or a later date."
-        reply_or_push(user_id, event.reply_token, TextSendMessage(bi(jp, en)))
+        # 受付時間チェック（日本語＋英語の両方を1通で案内）
+        state = service_window_state()
+        if state == "before16":
+            jp = "ただいま準備中のため、予約受付は16:00からです。16:00以降にお試しください。"
+            en = "We're preparing for service. Reservations open at 16:00. Please try again after 16:00."
+            reply_or_push(user_id, event.reply_token, TextSendMessage(bi(jp, en)))
+            return
+        if state == "after22":
+            jp = "本日の予約受付は終了しました。22:00以降は、明日以降の日時でご予約ください。"
+            en = "Today's reservation window has closed. After 22:00, please book for tomorrow or a later date."
+            reply_or_push(user_id, event.reply_token, TextSendMessage(bi(jp, en)))
+            return
+
+        # 受付中 → 時間選択へ（18:00〜22:00、かつ今から45分以降のみ）
+        ask_time(event.reply_token, v, user_id)
         return
 
-    # 営業時間内 → 時間選択へ
-    ask_time(event.reply_token, v, user_id)
-    return
 
 
     # 照会内容の最終確認（照会送信前）
