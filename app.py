@@ -350,45 +350,68 @@ def schedule_prearrival_reminder(req_id: str):
 
         # 表示用
         wanted_dt = datetime.datetime.fromisoformat(r["wanted_iso"]).astimezone(JST)
-        tstr = wanted_dt.strftime("%H:%M")
-        pax  = r["pax"]
-        pick = "希望" if r.get("pickup") else "不要"
+        tstr  = wanted_dt.strftime("%H:%M")
+        pax   = r["pax"]
         hotel = r.get("hotel") or "-"
-        lang = SESS.get(user_id, {}).get("lang", "jp")
-        foreign_hint = "（英語）" if lang == "en" else ""
+        lang  = SESS.get(user_id, {}).get("lang", "jp")
+        pickup = bool(r.get("pickup"))
 
-        # ユーザーへ（言語別・送迎も明記）
-        user_msg_jp = (
-            f"【リマインド】このあと15分でご予約です。\n"
-            f"店舗：{st['name']}\n"
-            f"時間：{tstr}／{pax}名\n"
-            f"送迎：{pick}（{hotel}）\n"
-            f"Googleマップ：{st['map_url']}"
+        # 強い警告（送迎あり/なし・日英で分岐）
+        jp_warn_pick = (
+            "⚠️ 必ず時間までに『集合場所』へお越しください。\n"
+            "⏰ 遅れる場合は “予約時間の15分前まで” に必ずお店へお電話を！\n"
+            "🚫 連絡なしの遅刻・不着は『予約キャンセル』になります。"
         )
-        user_msg_en = (
-            f"[Reminder] Your table is in 15 minutes.\n"
-            f"Restaurant: {st['name']}\n"
-            f"Time: {tstr} / {pax} people\n"
-            f"Pickup: {'Need' if r.get('pickup') else 'No'} ({hotel})\n"
-            f"Google Maps: {st['map_url']}"
+        jp_warn_nopick = (
+            "⚠️ 必ず『予約時間までにご来店』ください。\n"
+            "⏰ 遅れる場合は “予約時間の15分前まで” に必ずお店へお電話を！\n"
+            "🚫 連絡なしの遅刻は『予約キャンセル』になります。"
         )
-        try:
-            line_bot_api.push_message(
-                user_id,
-                TextSendMessage(user_msg_jp if lang == "jp" else user_msg_en)
+        en_warn_pick = (
+            "⚠️ Please be at the PICKUP POINT ON TIME.\n"
+            "⏰ If you will be late, CALL the restaurant at least 15 minutes before your time.\n"
+            "🚫 No-show or late without notice will be CANCELLED."
+        )
+        en_warn_nopick = (
+            "⚠️ Please arrive at the RESTAURANT ON TIME.\n"
+            "⏰ If you will be late, CALL the restaurant at least 15 minutes before your time.\n"
+            "🚫 No-show or late without notice will be CANCELLED."
+        )
+
+        # ユーザーへ（言語別・送迎明記・強調警告つき）
+        if lang == "jp":
+            user_msg = (
+                "【リマインド】このあと15分でご予約です。\n"
+                f"店舗：{st['name']}\n"
+                f"時間：{tstr}／{pax}名\n"
+                f"送迎：{'希望' if pickup else '不要'}（{hotel}）\n"
+                f"Googleマップ：{st['map_url']}\n\n" +
+                (jp_warn_pick if pickup else jp_warn_nopick)
             )
+        else:
+            user_msg = (
+                "[Reminder] Your table is in 15 minutes.\n"
+                f"Restaurant: {st['name']}\n"
+                f"Time: {tstr} / {pax} people\n"
+                f"Pickup: {'Need' if pickup else 'No'} ({hotel})\n"
+                f"Google Maps: {st['map_url']}\n\n" +
+                (en_warn_pick if pickup else en_warn_nopick)
+            )
+        try:
+            line_bot_api.push_message(user_id, TextSendMessage(user_msg))
         except Exception as e:
             print("reminder user push failed:", e)
 
         # 店舗へ（誰の予約か分かる詳細＋外国人フラグ）
         store_msg = (
-            "【リマインド】このあと15分でご予約です。\n"
+            "【15分前リマインド】\n"
             f"お名前：{r.get('name','-')}\n"
             f"電話：{r.get('phone','-')}\n"
             f"時間：{tstr}／{pax}名\n"
-            f"送迎：{pick}（{hotel}）"
-            + (f"\n※外国人のお客様 {foreign_hint}" if lang == "en" else "")
+            f"送迎：{'希望' if pickup else '不要'}（{hotel}）"
         )
+        if lang == "en":
+            store_msg += "\n※外国人のお客様（英語）"
         try:
             line_bot_api.push_message(st["line_user_id"], TextSendMessage(store_msg))
         except Exception as e:
@@ -399,6 +422,7 @@ def schedule_prearrival_reminder(req_id: str):
     fire_at = wanted_dt - timedelta(minutes=15)
     delay = max(0, int((fire_at - now_jst()).total_seconds()))
     threading.Timer(delay, _send).start()
+
 
 # ====== Webhook ======
 # /webhook: すべてのHTTPメソッドを許可し、まずログを出す
