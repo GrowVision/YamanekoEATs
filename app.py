@@ -882,26 +882,69 @@ def finalize_booking(reply_token, user_id):
     except Exception as e:
         print("push confirm to store failed:", e)
 
-    # --- ユーザーへ確定案内 + キャンセル注意 ---
-    user_msg = lang_text(
-        lang_code,
-        f"ご予約が確定しました。\n"
-        f"店舗：{store['name']}\n"
-        f"時間：{tstr}／{req['pax']}名\n"
-        f"送迎：{pickup_label}（{hotel}）\n"
-        f"キャンセルは必ずお電話でお願いします。\n"
-        f"Googleマップ：{store['map_url']}",
-        f"Your booking is confirmed.\n"
-        f"Restaurant: {store['name']}\n"
-        f"Time: {tstr} / {req['pax']} people\n"
-        f"Pickup: {'Need' if req.get('pickup') else 'No'} ({hotel})\n"
-        f"For cancellation, please call the restaurant.\n"
-        f"Google Maps: {store['map_url']}"
-    )
+    # --- ユーザーへ確定案内 + バックれ防止の強い注意書き（言語＆送迎で分岐） ---
+    if lang_code == "jp":
+        if req.get("pickup"):
+            # 送迎あり：集合場所へ
+            warning = (
+                "\n\n🚨🚨🚨 重要なお知らせ（バックれ防止） 🚨🚨🚨\n"
+                "必ず **予約時間までに集合場所へ** お越しください。\n"
+                "もし間に合わない場合は、**予約時刻の15分前までに必ずお店へお電話**ください。\n"
+                "連絡なしで来られない場合は、❌ **予約は自動キャンセル** となります。\n"
+                "みなさまのご協力をお願いします！🙏"
+            )
+        else:
+            # 店舗に直接来店
+            warning = (
+                "\n\n🚨🚨🚨 重要なお知らせ（バックれ防止） 🚨🚨🚨\n"
+                "必ず **予約時間までにご来店** ください。\n"
+                "もし間に合わない場合は、**予約時刻の15分前までに必ずお店へお電話**ください。\n"
+                "連絡なしで来店されない場合は、❌ **予約は自動キャンセル** となります。\n"
+                "ご理解とご協力をお願いいたします！🙏"
+            )
+
+        user_msg = (
+            f"ご予約が確定しました。\n"
+            f"店舗：{store['name']}\n"
+            f"時間：{tstr}／{req['pax']}名\n"
+            f"送迎：{pickup_label}（{hotel}）\n"
+            f"Googleマップ：{store['map_url']}"
+            f"{warning}\n"
+            f"\n※キャンセル・変更は必ずお電話でお願いします。"
+        )
+    else:
+        # English
+        if req.get("pickup"):
+            warning = (
+                "\n\n🚨🚨🚨 IMPORTANT (No-show prevention) 🚨🚨🚨\n"
+                "Please **be at the meeting point by your reservation time**.\n"
+                "If you’re running late, **call the restaurant at least 15 minutes before** your time.\n"
+                "Without contact, your booking may be **automatically cancelled** ❌.\n"
+                "Thank you for your cooperation! 🙏"
+            )
+        else:
+            warning = (
+                "\n\n🚨🚨🚨 IMPORTANT (No-show prevention) 🚨🚨🚨\n"
+                "Please **arrive at the restaurant by your reservation time**.\n"
+                "If you’re running late, **call the restaurant at least 15 minutes before** your time.\n"
+                "Without contact, your booking may be **automatically cancelled** ❌.\n"
+                "Thank you for your cooperation! 🙏"
+            )
+
+        user_msg = (
+            f"Your booking is confirmed.\n"
+            f"Restaurant: {store['name']}\n"
+            f"Time: {tstr} / {req['pax']} people\n"
+            f"Pickup: {'Need' if req.get('pickup') else 'No'} ({hotel})\n"
+            f"Google Maps: {store['map_url']}"
+            f"{warning}\n"
+            f"\n*For cancellation/changes, please call the restaurant.*"
+        )
+
+    # まず reply、失敗時のみ push（重複送信を避ける）
     try:
         line_bot_api.reply_message(reply_token, TextSendMessage(user_msg))
     except Exception as e:
-        # 返信失敗時のみpush（成功時は二重送信しない）
         try:
             line_bot_api.push_message(user_id, TextSendMessage(user_msg))
             print("[FALLBACK] confirm reply→push:", e)
@@ -913,7 +956,5 @@ def finalize_booking(reply_token, user_id):
 
     # 後片付け
     PENDING_BOOK.pop(user_id, None)
-
-
 
 
