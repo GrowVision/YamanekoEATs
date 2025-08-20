@@ -34,7 +34,9 @@ STORES = [
         "profile": "港から車5分。石垣牛と島野菜。",
         "map_url": "https://goo.gl/maps/xxxxxxxx",
         "pickup_ok": True,
-        "line_user_id": "UXXXXXXXXXXXXXXX"  # ←差し替え
+        "pickup_point": "",             # 任意（使っているなら残す）
+        "instagram_url": "",            # ★追加（空でもOK）
+        "line_user_id": "UXXXXXXXXXXXXXXX"
     },
     {
         "store_id": "ST2",
@@ -42,7 +44,9 @@ STORES = [
         "profile": "地魚と泡盛。21:30 L.O.",
         "map_url": "https://goo.gl/maps/yyyyyyyyyyyyy",
         "pickup_ok": False,
-        "line_user_id": "UYYYYYYYYYYYYYYY"  # ←差し替え
+        "pickup_point": "",             # 任意
+        "instagram_url": "",            # ★追加
+        "line_user_id": "UYYYYYYYYYYYYYYY"
     },
 ]
 
@@ -69,27 +73,28 @@ def _load_stores_from_csv(url: str):
     resp.raise_for_status()
     f = io.StringIO(resp.text)
     reader = csv.DictReader(f)
-
     stores = []
-    # 行番号を出すため enumerate（ヘッダ行は1行目なので実データは2行目から）
-    for row_idx, row in enumerate(reader, start=2):
-        sid = (row.get("store_id") or "").strip()
-        name = (row.get("name") or "").strip()
-        profile = (row.get("profile") or "").strip()
-        map_url = (row.get("map_url") or "").strip()
-        pickup_ok_raw = row.get("pickup_ok")
-        pickup_ok = _parse_bool(pickup_ok_raw)
-        line_user_id = (row.get("line_user_id") or "").strip()
+    for row in reader:
+        sid         = (row.get("store_id") or "").strip()
+        name        = (row.get("name") or "").strip()
+        profile     = (row.get("profile") or "").strip()
+        map_url     = (row.get("map_url") or "").strip()
+        pickup_ok   = _parse_bool(row.get("pickup_ok"))
+        # ★ここでInstagram列を読む（無ければ空文字）
+        instagram_url = (row.get("instagram_url") or "").strip()
+        # （すでに運用しているなら pickup_point もここで読む想定）
+        pickup_point  = (row.get("pickup_point") or "").strip()
+        line_user_id  = (row.get("line_user_id") or "").strip()
 
         # 必須: store_id, name, line_user_id
         if not sid or not name or not line_user_id:
-            print(f"[STORES][SKIP] row={row_idx} sid='{sid}' name='{name}' line_user_id='{line_user_id}'  ※必須列欠落")
             continue
 
-        # ★ここがあなたのデバッグ行（行番号も出すようにした版）
-        print(f"[STORES] row={row_idx} sid={sid} name={name} pickup_ok_raw={pickup_ok_raw!r} -> {pickup_ok}")
-
-        pickup_point = (row.get("pickup_point") or "").strip()
+        # デバッグログ（任意）
+        try:
+            print(f"[STORES] load: sid={sid} name={name} pickup_ok_raw={row.get('pickup_ok')} -> {pickup_ok} ig={instagram_url[:40]}")
+        except Exception:
+            pass
 
         stores.append({
             "store_id": sid,
@@ -97,7 +102,8 @@ def _load_stores_from_csv(url: str):
             "profile": profile,
             "map_url": map_url,
             "pickup_ok": pickup_ok,
-            "pickup_point": pickup_point,   # ★追加
+            "pickup_point": pickup_point,       # 既に使っている場合は残す
+            "instagram_url": instagram_url,     # ★追加
             "line_user_id": line_user_id
         })
     return stores
@@ -272,12 +278,47 @@ def safe_push(uid, message, store_name=""):
         print(f"[PUSH NG] {store_name} {uid} err={e}")
     return False
 # 追加ここまで
-
 # ====== Flex: 候補カード ======
 def candidate_bubble(store, lang="jp"):
-    title = store["name"]
-    body1 = store["profile"]
-    map_url = store["map_url"]
+    title   = store.get("name", "")
+    body1   = store.get("profile", "")
+    map_url = store.get("map_url", "")
+    ig_url  = (store.get("instagram_url") or "").strip()  # ← シートに無くてもOK（空ならボタン非表示）
+
+    # --- フッタボタンを配列で組み立て（後から条件で差し込む） ---
+    footer_buttons = [
+        ButtonComponent(
+            style="primary",
+            action=URIAction(
+                label=lang_text(lang, "Googleマップ", "Google Maps"),
+                uri=map_url or "https://maps.google.com"  # map_urlが空でも落ちないように保険
+            )
+        )
+    ]
+
+    # Instagram が設定されている店だけ Instagram ボタンを追加
+    if ig_url:
+        footer_buttons.append(
+            ButtonComponent(
+                style="secondary",
+                action=URIAction(
+                    # ブランド名として英語固定でOK。日本語にしたいなら lang_text に変えてください。
+                    label="Instagram",
+                    uri=ig_url
+                )
+            )
+        )
+
+    # 予約申請ボタン（従来どおり）
+    footer_buttons.append(
+        ButtonComponent(
+            style="link",
+            action=PostbackAction(
+                label=lang_text(lang, "この店に予約申請", "Book this place"),
+                data=json.dumps({"type": "book", "store_id": store.get("store_id")})
+            )
+        )
+    )
 
     return BubbleContainer(
         body=BoxComponent(
@@ -290,19 +331,7 @@ def candidate_bubble(store, lang="jp"):
         footer=BoxComponent(
             layout="vertical",
             spacing="sm",
-            contents=[
-                ButtonComponent(
-                    style="primary",
-                    action=URIAction(label=lang_text(lang, "Googleマップ", "Google Maps"), uri=map_url)
-                ),
-                ButtonComponent(
-                    style="link",
-                    action=PostbackAction(
-                        label=lang_text(lang, "この店に予約申請", "Book this place"),
-                        data=json.dumps({"type": "book", "store_id": store["store_id"]})
-                    )
-                )
-            ]
+            contents=footer_buttons
         )
     )
 
