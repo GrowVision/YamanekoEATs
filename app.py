@@ -1218,9 +1218,28 @@ def start_inquiry(reply_token, user_id):
 # ====== 予約確定 ======
 def finalize_booking(reply_token, user_id):
     pb = PENDING_BOOK.get(user_id)
+
+    # --- 再送/連打で PENDING_BOOK が消えた後に同じポストバックが来た場合の救済 ---
     if not pb:
-        line_bot_api.reply_message(reply_token, TextSendMessage("セッションが見つかりませんでした。最初からやり直してください。"))
+        # そのユーザーの“直近の確定済みリクエスト”があれば、確定済み案内だけ返して黙って終了
+        latest_confirmed = None
+        for rid, r in reversed(list(REQUESTS.items())):
+            if r.get("user_id") == user_id and r.get("confirmed"):
+                latest_confirmed = r
+                break
+        if latest_confirmed:
+            lang = SESS.get(user_id, {}).get("lang", "jp")
+            msg_jp = "すでに予約は確定しています。"
+            msg_en = "Your booking is already confirmed."
+            reply_or_push(user_id, reply_token, TextSendMessage(lang_text(lang, msg_jp, msg_en)))
+            return
+
+        # 確定情報もない → これだけ再送されてきたケースなので通常のエラーメッセージ
+        reply_or_push(user_id, reply_token, TextSendMessage(
+            "セッションが見つかりませんでした。最初からやり直してください。"
+        ))
         return
+
 
     req = REQUESTS.get(pb["req_id"])
     store = STORE_BY_ID.get(pb["store_id"])
@@ -1268,72 +1287,60 @@ def finalize_booking(reply_token, user_id):
     except Exception as e:
         print("push confirm to store failed:", e)
 
-    # --- ユーザーへ確定案内 + バックれ防止の強い注意書き（言語＆送迎で分岐） ---
+    # --- ユーザーへ確定案内（JP/EN・送迎で警告文を分岐） ---
     if lang_code == "jp":
         if req.get("pickup"):
-            # 送迎あり：集合場所へ
             warning = (
-                "\n\n🚨🚨🚨 重要なお知らせ（ドタキャン防止） 🚨🚨🚨\n"
-                "必ず **予約時間までに集合場所へ** お越しください。\n"
-                "もし間に合わない場合は、**予約時刻の15分前までに必ずお店へお電話**ください。\n"
-                "連絡なしの遅刻・不着は、❌ **予約は自動キャンセル** となります。\n"
-                "ご協力をお願いいたします！🙏"
+                "⚠️【重要なお知らせ（ドタキャン防止）】\n"
+                "・予約時間までに必ず『集合場所』へお越しください。\n"
+                "・遅れる場合は“予約時刻の15分前まで”に必ずお店へお電話ください。\n"
+                "・連絡なしの遅刻・不着は、予約を自動キャンセルします。\n"
+                "・キャンセル／変更はお電話のみで承ります。"
             )
         else:
-            # 店舗に直接来店
             warning = (
-                "\n\n🚨🚨🚨 重要なお知らせ（ドタキャン防止） 🚨🚨🚨\n"
-                "必ず **予約時間までにご来店** ください。\n"
-                "もし間に合わない場合は、**予約時刻の15分前までに必ずお店へお電話**ください。\n"
-                "連絡なしで来店されない場合は、❌ **予約は自動キャンセル** となります。\n"
-                "ご理解とご協力をお願いいたします！🙏"
+                "⚠️【重要なお知らせ（ドタキャン防止）】\n"
+                "・予約時間までに必ずご来店ください。\n"
+                "・遅れる場合は“予約時刻の15分前まで”に必ずお店へお電話ください。\n"
+                "・連絡なしの遅刻・不着は、予約を自動キャンセルします。\n"
+                "・キャンセル／変更はお電話のみで承ります。"
             )
 
         user_msg = (
-            f"ご予約が確定しました。\n"
-            f"店舗：{store['name']}\n"
+            "【予約確定】\n"
+            f"\n店舗：{store['name']}\n"
             f"時間：{tstr}／{req['pax']}名\n"
             f"送迎：{pickup_label}（{hotel}）\n"
-            f"Googleマップ：{store['map_url']}"
-            f"{warning}\n"
-            f"\n※キャンセル・変更は必ずお電話でお願いします。"
+            f"Googleマップ：{store['map_url']}\n"
+            f"\n{warning}"
         )
+
     else:
-        # English
         if req.get("pickup"):
             warning = (
-                "\n\n🚨🚨🚨 IMPORTANT (No-show prevention) 🚨🚨🚨\n"
-                "Please **be at the meeting point by your reservation time**.\n"
-                "If you’re running late, **call the restaurant at least 15 minutes before** your time.\n"
-                "Without contact, your booking may be **automatically cancelled** ❌.\n"
-                "Thank you for your cooperation! 🙏"
+                "⚠️ IMPORTANT (No-show prevention)\n"
+                "• Be at the meeting point by your reservation time.\n"
+                "• If you will be late, CALL the restaurant at least 15 minutes before your time.\n"
+                "• Without notice, your booking will be automatically cancelled.\n"
+                "• Any change/cancellation by phone only."
             )
         else:
             warning = (
-                "\n\n🚨🚨🚨 IMPORTANT (No-show prevention) 🚨🚨🚨\n"
-                "Please **arrive at the restaurant by your reservation time**.\n"
-                "If you’re running late, **call the restaurant at least 15 minutes before** your time.\n"
-                "Without contact, your booking may be **automatically cancelled** ❌.\n"
-                "Thank you for your cooperation! 🙏"
+                "⚠️ IMPORTANT (No-show prevention)\n"
+                "• Arrive at the restaurant by your reservation time.\n"
+                "• If you will be late, CALL the restaurant at least 15 minutes before your time.\n"
+                "• Without notice, your booking will be automatically cancelled.\n"
+                "• Any change/cancellation by phone only."
             )
 
         user_msg = (
-            f"Your booking is confirmed.\n"
-            f"Restaurant: {store['name']}\n"
+            "[Booking Confirmed]\n"
+            f"\nRestaurant: {store['name']}\n"
             f"Time: {tstr} / {req['pax']} people\n"
             f"Pickup: {'Need' if req.get('pickup') else 'No'} ({hotel})\n"
-            f"Google Maps: {store['map_url']}"
-            f"{warning}\n"
-            f"\n*For cancellation/changes, please call the restaurant.*"
+            f"Google Maps: {store['map_url']}\n"
+            f"\n{warning}"
         )
-
-    # ▼追加：送迎希望のときだけ集合場所を追記（送迎不要なら出さない）
-    pickup_point = (store.get("pickup_point") or "").strip()
-    if req.get("pickup") and pickup_point:
-        if lang_code == "jp":
-            user_msg += f"\n\n📍集合場所：{pickup_point}"
-        else:
-            user_msg += f"\n\n📍Pickup point: {pickup_point}"
 
     # まず reply、失敗時のみ push（重複送信を避ける）
     try:
