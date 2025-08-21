@@ -511,22 +511,13 @@ def _norm(s: str) -> str:
 
 def is_start_trigger(text: str) -> bool:
     s = _norm(text)
-    # 単体パターン
-    if s in {
-        "予約をはじめる",
-        "予約する",
-        "予約をする",        # ★追加
-        "start reservation",
-        "reserve",
-        "予約/reserve",
-        "予約する/reserve",
-        "予約 / reserve",
-        "予約する / reserve",
-    }:
+    if s in {"予約をはじめる","予約する","予約をする","start reservation","reserve",
+             "予約/reserve","予約する/reserve","予約 / reserve","予約する / reserve"}:
         return True
     if "予約" in s and ("reserve" in s or "reservation" in s):
         return True
     return False
+
 
     
     # 日英併記や区切り文字の違いを許容
@@ -583,46 +574,59 @@ def on_text(event: MessageEvent):
         return
 
 
-    # 予約フロー：氏名→電話（★このブロックが関数の外に出ていたのがバグ）
+    # 予約フロー：氏名→電話→編集
     if user_id in PENDING_BOOK:
-        pb = PENDING_BOOK[user_id]
+        pb   = PENDING_BOOK[user_id]
         lang = SESS.get(user_id, {}).get("lang", "jp")
 
+        # --- 1) 氏名入力直後：電話を促す ---
         if pb["step"] == "name":
             PENDING_BOOK[user_id]["name"] = (text or "").strip()
             PENDING_BOOK[user_id]["step"] = "phone"
-            if lang == "en":
-                reply_or_push(
-                    user_id, event.reply_token,
-                    TextSendMessage("Please enter your phone number with country code (e.g., +81 7012345678).")
-                )
-            else:
-                reply_or_push(
-                    user_id, event.reply_token,
-                    TextSendMessage("電話番号を入力してください（例：07012345678）")
-                )
+            msg = (
+                "電話番号を入力してください（例：07012345678）"
+                if lang == "jp"
+                else "Please enter your phone number with country code (e.g., +81 7012345678)."
+            )
+            reply_or_push(user_id, event.reply_token, TextSendMessage(msg))
             return
 
+        # --- 2) 電話番号の入力・検証 ---
         elif pb["step"] == "phone":
+            t = (text or "").strip()
+            if not _valid_phone(t, lang):
+                msg = (
+                    "電話番号の形式で入力してください（例：07012345678）"
+                    if lang == "jp"
+                    else "Please enter a valid number (e.g., +81 7012345678)."
+                )
+                reply_or_push(user_id, event.reply_token, TextSendMessage(msg))
+                return
+            PENDING_BOOK[user_id]["phone"] = _clean_phone(t)
+            PENDING_BOOK[user_id]["step"]  = "idle"
+            ask_booking_confirm(event.reply_token, user_id)
+            return
 
-                    # ★追記：編集系
+        # --- 3) 編集：氏名のみ修正 ---
         elif pb["step"] == "edit_name":
             PENDING_BOOK[user_id]["name"] = (text or "").strip()
             PENDING_BOOK[user_id]["step"] = "idle"
             ask_booking_confirm(event.reply_token, user_id)
             return
 
+        # --- 4) 編集：電話のみ修正 ---
         elif pb["step"] == "edit_phone":
-            lang = SESS.get(user_id, {}).get("lang", "jp")
             t = (text or "").strip()
             if not _valid_phone(t, lang):
-                reply_or_push(user_id, event.reply_token,
-                              TextSendMessage(lang_text(lang,
-                                  "電話番号の形式で入力してください（例：07012345678）",
-                                  "Please enter a valid number (e.g., +81 7012345678).")))
+                msg = (
+                    "電話番号の形式で入力してください（例：07012345678）"
+                    if lang == "jp"
+                    else "Please enter a valid number (e.g., +81 7012345678)."
+                )
+                reply_or_push(user_id, event.reply_token, TextSendMessage(msg))
                 return
             PENDING_BOOK[user_id]["phone"] = _clean_phone(t)
-            PENDING_BOOK[user_id]["step"] = "idle"
+            PENDING_BOOK[user_id]["step"]  = "idle"
             ask_booking_confirm(event.reply_token, user_id)
             return
 
@@ -893,6 +897,35 @@ def on_postback(event: PostbackEvent):
             PENDING_BOOK.pop(user_id, None)
             ask_lang(event.reply_token, user_id)
         return
+        
+        # ★氏名/電話どちらを直すかのメニュー表示
+    if step == "edit_personal_menu":
+        ask_edit_personal_menu(event.reply_token, user_id)
+        return
+
+    # ★氏名/電話のどちらを編集するか選択 → 入力待ちへ
+    if step == "edit_personal":
+        target = data.get("target")
+        lang = SESS.get(user_id, {}).get("lang", "jp")
+        if target == "name":
+            PENDING_BOOK.setdefault(user_id, {})["step"] = "edit_name"
+            msg = "正しいお名前を入力してください。" if lang == "jp" else "Please enter your full name."
+            reply_or_push(user_id, event.reply_token, TextSendMessage(msg))
+            return
+        if target == "phone":
+            PENDING_BOOK.setdefault(user_id, {})["step"] = "edit_phone"
+            msg = ("電話番号を入力してください（例：07012345678）"
+                   if lang == "jp"
+                   else "Please enter your phone number with country code (e.g., +81 7012345678).")
+            reply_or_push(user_id, event.reply_token, TextSendMessage(msg))
+            return
+        # 修正なし → 確認に戻す
+        ask_booking_confirm(event.reply_token, user_id)
+        return
+
+    
+
+
 
 # ====== 質問UI ======
 def ask_lang(reply_token, user_id):
