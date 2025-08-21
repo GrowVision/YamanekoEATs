@@ -465,30 +465,23 @@ def schedule_prearrival_reminder(req_id: str):
 
 # ====== Webhook ======
 # /webhook: すべてのHTTPメソッドを許可し、まずログを出す
-@app.route("/webhook", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE", "PATCH"], strict_slashes=False)
-
-@app.route("/admin/timecheck")
-def admin_timecheck():
-    t = now_jst()
-    return {
-        "now_jst": t.isoformat(),
-        "service_state": service_window_state(t),
-        "note": "JST基準。state=before16/inside/after22"
-    }
-
+@app.route(
+    "/webhook",
+    methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE", "PATCH"],
+    strict_slashes=False
+)
 def webhook():
     # --- ログ（RenderのLogsに出ます）
     try:
         print("[WEBHOOK] method=", request.method, "path=", request.path)
-        # LINEのVerifyが本当にPOSTを投げているか、ここで分かります
     except Exception:
         pass
 
-    # --- 開発中は、どのメソッドでも 200 を返して先に進む ---
+    # --- POST 以外は 200 返して終了（LINEの疎通確認対策）
     if request.method != "POST":
-        return "OK"  # GET/HEAD/OPTIONS でも 200
+        return "OK"
 
-    # POSTの場合のみ、LINE SDKへ渡す
+    # POST のみ LINE SDK で処理
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
     try:
@@ -498,6 +491,19 @@ def webhook():
         return "OK", 200
 
     return "OK"
+
+
+# Web サーバ時刻の確認用（JST とウィンドウ判定を可視化）
+@app.route("/admin/timecheck")
+def admin_timecheck():
+    t = now_jst()
+    return {
+        "now_jst": t.isoformat(),
+        "service_state": service_window_state(t),
+        "note": "JST基準。state=before16/inside/after22"
+    }
+
+
 # ★ここから追加：起動ワードのゆらぎ吸収ユーティリティ
 def _norm(s: str) -> str:
     # 全角/半角・大文字小文字・前後空白を吸収
