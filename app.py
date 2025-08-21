@@ -179,25 +179,32 @@ PENDING_BOOK = {}  # user_id -> {"req_id","store_id","step", "name"}
 def now_jst():
     return datetime.datetime.now(JST)
 
-def next_half_hour_slots(n=6):
-    """18:00開始を基本に、かつ '今から45分後以降' を最低条件として30分刻みで n 個返す"""
-    t = now_jst()
+def next_half_hour_slots(count: int = 6, must_be_after: datetime.datetime | None = None):
+    """
+    18:00〜22:00 の間で 30分刻みの候補を返す。
+    かつ 'must_be_after'（例: 現在+45分）以降を最低条件にする。
+    """
+    now = now_jst()
 
-    # きょうの 18:00
-    today_18 = t.replace(hour=18, minute=0, second=0, microsecond=0)
+    # きょうの 18:00 と 22:00（JST）
+    start_of_window = now.replace(hour=18, minute=0, second=0, microsecond=0)
+    end_of_window   = now.replace(hour=22, minute=0, second=0, microsecond=0)
 
-    # 今から45分後（送迎などの準備時間）
-    min_time = t + timedelta(minutes=45)
+    # “今+45分”などの条件と、18:00 を比較して遅い方から開始
+    min_start = must_be_after or (now + timedelta(minutes=45))
+    start_candidate = max(start_of_window, min_start)
 
-    # 開始時刻は  max(18:00, 今+45分)
-    start_candidate = max(today_18, min_time)
-
-    # :00 / :30 に切り上げ
+    # :00 / :30 に **切り上げ**
     add_min = (30 - (start_candidate.minute % 30)) % 30
-    start = (start_candidate + timedelta(minutes=add_min)).replace(second=0, microsecond=0)
+    first = (start_candidate + timedelta(minutes=add_min)).replace(second=0, microsecond=0)
 
-    # 30分刻みで n 個
-    slots = [start + timedelta(minutes=30*i) for i in range(n)]
+    # 30分刻みで count 個。ただし 22:00 を**超えない**よう制限
+    slots = []
+    cur = first
+    while len(slots) < count and cur <= end_of_window:
+        slots.append(cur)
+        cur = cur + timedelta(minutes=30)
+
     return slots
 
 
@@ -459,6 +466,16 @@ def schedule_prearrival_reminder(req_id: str):
 # ====== Webhook ======
 # /webhook: すべてのHTTPメソッドを許可し、まずログを出す
 @app.route("/webhook", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE", "PATCH"], strict_slashes=False)
+
+@app.route("/admin/timecheck")
+def admin_timecheck():
+    t = now_jst()
+    return {
+        "now_jst": t.isoformat(),
+        "service_state": service_window_state(t),
+        "note": "JST基準。state=before16/inside/after22"
+    }
+
 def webhook():
     # --- ログ（RenderのLogsに出ます）
     try:
@@ -801,25 +818,22 @@ def ask_time(reply_token, lang, user_id):
     16:00 受付開始 / 予約時間帯 18:00–22:00 に合わせて
     スロットを提示。受け付けは言語別メッセージでガイド。
     """
-    state = service_window_state()  # 下の 2) で定義
-    if state != "open":
-        jp = (
-            "ただいま店舗準備中です。\n"
-            "受付は 16:00 から、予約は 18:00〜22:00 のみです。"
-        ) if state == "pre" else (
-            "本日の受付は終了しました。22:00 以降は明日以降をご予約ください。"
-        )
-        en = (
-            "We accept requests from 16:00. "
-            "Tables are available only between 18:00 and 22:00."
-        ) if state == "pre" else (
-            "Today’s booking window has closed. "
-            "After 22:00, please book for another day."
-        )
+    # ← ここを修正： service_window_state() の返り値に合わせて正しく分岐
+    state = service_window_state()  # "before16" / "inside" / "after22"
+
+    if state == "before16":
+        jp = "ただいま準備中のため、予約受付は16:00からです。16:00以降にお試しください。"
+        en = "We're preparing for service. Reservations open at 16:00. Please try again after 16:00."
         reply_or_push(user_id, reply_token, TextSendMessage(lang_text(lang, jp, en)))
         return
 
-    # 45分後以降 / 18:00〜22:00 / 30分刻み のスロット生成
+    if state == "after22":
+        jp = "本日の予約受付は終了しました。22:00以降は、明日以降の日時でご予約ください。"
+        en = "Today's booking window has closed. After 22:00, please book for tomorrow or a later date."
+        reply_or_push(user_id, reply_token, TextSendMessage(lang_text(lang, jp, en)))
+        return
+
+    # ここに来たら "inside"（受付中）なので、時間スロットを提示
     slots = next_half_hour_slots(
         count=8,
         must_be_after=now_jst() + timedelta(minutes=45)
@@ -838,6 +852,7 @@ def ask_time(reply_token, lang, user_id):
             quick_reply=qreply(actions)
         )
     )
+
 
 def ask_pax(reply_token, lang, user_id):
     """人数を聞く（1〜4はボタン、5名以上は手入力へ誘導）"""
