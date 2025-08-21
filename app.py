@@ -752,20 +752,16 @@ def on_postback(event: PostbackEvent):
         ask_pickup(event.reply_token, lang, user_id)
         return
 
-    # ③ 送迎の要否が選ばれた → ホテル名（任意）テキスト入力へ
+   # ③ 送迎の要否が選ばれた → ホテル名テキスト入力へ（文言をシンプルに）
     if step == "pickup":
         # 互換性：v=="yes"/"no" または need=True/False のどちらでも受ける
         need = (data.get("v") == "yes") or (data.get("need") is True)
         SESS.setdefault(user_id, {})["pickup"] = bool(need)
 
-        # このあと任意でホテル名を聞く（空送信でOK）
+        # 次はホテル名入力（※空送信でも内部的には問題なくスキップ可能）
         SESS[user_id]["await"] = "hotel_name"
         lang = SESS.get(user_id, {}).get("lang", "jp")
-        msg = (
-            "ホテル名をご記入ください（任意・空送信でスキップ可）"
-            if lang == "jp" else
-            "Please type your hotel name (optional). You can send empty to skip."
-        )
+        msg = "ホテル名をご記入ください。" if lang == "jp" else "Please enter your hotel name."
         reply_or_push(user_id, event.reply_token, TextSendMessage(msg))
         return
 
