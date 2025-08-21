@@ -515,6 +515,7 @@ def is_start_trigger(text: str) -> bool:
     if s in {
         "予約をはじめる",
         "予約する",
+        "予約をする",        # ★追加
         "start reservation",
         "reserve",
         "予約/reserve",
@@ -523,6 +524,11 @@ def is_start_trigger(text: str) -> bool:
         "予約する / reserve",
     }:
         return True
+    if "予約" in s and ("reserve" in s or "reservation" in s):
+        return True
+    return False
+
+    
     # 日英併記や区切り文字の違いを許容
     if "予約" in s and ("reserve" in s or "reservation" in s):
         return True
@@ -563,11 +569,13 @@ def on_text(event: MessageEvent):
         ask_confirm(event.reply_token, user_id)
         return
 
-    # 起動ワード
+# 起動ワード（常に最初からやり直し）
     if is_start_trigger(text):
         SESS[user_id] = {}
+        PENDING_BOOK.pop(user_id, None)  # ★追加：途中までの予約入力も破棄
         ask_lang(event.reply_token, user_id)
         return
+
 
     # 予約フロー：氏名→電話（★このブロックが関数の外に出ていたのがバグ）
     if user_id in PENDING_BOOK:
@@ -752,18 +760,24 @@ def on_postback(event: PostbackEvent):
         ask_pickup(event.reply_token, lang, user_id)
         return
 
-   # ③ 送迎の要否が選ばれた → ホテル名テキスト入力へ（文言をシンプルに）
+   # ③ 送迎の要否が選ばれた
     if step == "pickup":
-        # 互換性：v=="yes"/"no" または need=True/False のどちらでも受ける
         need = (data.get("v") == "yes") or (data.get("need") is True)
-        SESS.setdefault(user_id, {})["pickup"] = bool(need)
+        sess = SESS.setdefault(user_id, {})
+        sess["pickup"] = bool(need)
 
-        # 次はホテル名入力（※空送信でも内部的には問題なくスキップ可能）
-        SESS[user_id]["await"] = "hotel_name"
-        lang = SESS.get(user_id, {}).get("lang", "jp")
-        msg = "ホテル名をご記入ください。" if lang == "jp" else "Please enter your hotel name."
-        reply_or_push(user_id, event.reply_token, TextSendMessage(msg))
+        lang = sess.get("lang", "jp")
+        if need:
+            # ★送迎ありのときだけホテル名を聞く
+            sess["await"] = "hotel_name"
+            msg = "ホテル名をご記入ください。" if lang == "jp" else "Please enter your hotel name."
+            reply_or_push(user_id, event.reply_token, TextSendMessage(msg))
+        else:
+            # ★送迎不要 → ホテル質問をスキップして最終確認へ
+            sess["hotel"] = ""  # 空で保持
+            ask_confirm(event.reply_token, user_id)
         return
+
 
     # === 追記ここまで ===
 
