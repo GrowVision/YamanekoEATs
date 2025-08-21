@@ -566,6 +566,12 @@ def on_text(event: MessageEvent):
     if SESS.get(user_id, {}).get("await") == "hotel_name":
         SESS[user_id]["hotel"] = text
         SESS[user_id].pop("await", None)
+                # ★編集モードなら解除して確認へ
+        if SESS.get(user_id, {}).get("edit_mode") == "hotel":
+            SESS[user_id].pop("edit_mode", None)
+            ask_confirm(event.reply_token, user_id)
+            return
+
         ask_confirm(event.reply_token, user_id)
         return
 
@@ -598,6 +604,29 @@ def on_text(event: MessageEvent):
             return
 
         elif pb["step"] == "phone":
+
+                    # ★追記：編集系
+        elif pb["step"] == "edit_name":
+            PENDING_BOOK[user_id]["name"] = (text or "").strip()
+            PENDING_BOOK[user_id]["step"] = "idle"
+            ask_booking_confirm(event.reply_token, user_id)
+            return
+
+        elif pb["step"] == "edit_phone":
+            lang = SESS.get(user_id, {}).get("lang", "jp")
+            t = (text or "").strip()
+            if not _valid_phone(t, lang):
+                reply_or_push(user_id, event.reply_token,
+                              TextSendMessage(lang_text(lang,
+                                  "電話番号の形式で入力してください（例：07012345678）",
+                                  "Please enter a valid number (e.g., +81 7012345678).")))
+                return
+            PENDING_BOOK[user_id]["phone"] = _clean_phone(t)
+            PENDING_BOOK[user_id]["step"] = "idle"
+            ask_booking_confirm(event.reply_token, user_id)
+            return
+
+            
             t = (text or "").strip()
             if not _valid_phone(t, lang):
                 if lang == "en":
@@ -728,6 +757,12 @@ def on_postback(event: PostbackEvent):
         iso = data.get("iso")
         if iso:
             SESS.setdefault(user_id, {})["time_iso"] = iso
+                    # ★編集モードなら連鎖質問せず、確認画面に戻す
+        if SESS.get(user_id, {}).get("edit_mode") == "time":
+            SESS[user_id].pop("edit_mode", None)
+            ask_confirm(event.reply_token, user_id)
+            return
+
         # 言語はセッションから（無ければJP）
         lang = SESS.get(user_id, {}).get("lang", "jp")
         ask_pax(event.reply_token, lang, user_id)
@@ -756,6 +791,12 @@ def on_postback(event: PostbackEvent):
             SESS.setdefault(user_id, {})["pax"] = int(v)
         except Exception:
             SESS.setdefault(user_id, {})["pax"] = 2
+                    # ★編集モードなら確認画面へ戻す
+        if SESS.get(user_id, {}).get("edit_mode") == "pax":
+            SESS[user_id].pop("edit_mode", None)
+            ask_confirm(event.reply_token, user_id)
+            return
+
 
         ask_pickup(event.reply_token, lang, user_id)
         return
@@ -768,14 +809,18 @@ def on_postback(event: PostbackEvent):
 
         lang = sess.get("lang", "jp")
         if need:
-            # ★送迎ありのときだけホテル名を聞く
+            # ★送迎あり：通常どおりホテル名を聞く
             sess["await"] = "hotel_name"
             msg = "ホテル名をご記入ください。" if lang == "jp" else "Please enter your hotel name."
             reply_or_push(user_id, event.reply_token, TextSendMessage(msg))
         else:
-            # ★送迎不要 → ホテル質問をスキップして最終確認へ
-            sess["hotel"] = ""  # 空で保持
-            ask_confirm(event.reply_token, user_id)
+            # 送迎なし：ホテル消去。編集モードなら即確認へ
+            sess["hotel"] = ""
+            if sess.get("edit_mode") == "pickup":
+                sess.pop("edit_mode", None)
+                ask_confirm(event.reply_token, user_id)
+            else:
+                ask_confirm(event.reply_token, user_id)
         return
 
 
@@ -793,6 +838,39 @@ def on_postback(event: PostbackEvent):
             SESS[user_id] = {}
             ask_lang(event.reply_token, user_id)
         return
+        # ★追記：照会前の編集メニュー表示
+    if step == "edit_request_menu":
+        ask_edit_request_menu(event.reply_token, user_id)
+        return
+
+    # ★追記：どの項目を直すか
+    if step == "edit_request":
+        target = data.get("target")
+        lang = SESS.get(user_id, {}).get("lang", "jp")
+        sess = SESS.setdefault(user_id, {})
+
+        if target == "time":
+            sess["edit_mode"] = "time"
+            ask_time(event.reply_token, lang, user_id)
+            return
+        if target == "pax":
+            sess["edit_mode"] = "pax"
+            ask_pax(event.reply_token, lang, user_id)
+            return
+        if target == "pickup":
+            sess["edit_mode"] = "pickup"
+            ask_pickup(event.reply_token, lang, user_id)
+            return
+        if target == "hotel":
+            sess["edit_mode"] = "hotel"
+            sess["await"] = "hotel_name"
+            reply_or_push(user_id, event.reply_token,
+                          TextSendMessage(lang_text(lang, "ホテル名をご記入ください。", "Please enter your hotel name.")))
+            return
+        # back
+        ask_confirm(event.reply_token, user_id)
+        return
+
 
     # 予約確定の最終確認（店舗選択→氏名・電話入力後）
     if step == "book_confirm":
@@ -910,7 +988,9 @@ def ask_pickup(reply_token, lang, user_id):
     )
 
 def ask_confirm(reply_token, user_id):
-    """照会送信前の最終確認（時間・人数・送迎・ホテルを表示）"""
+    """照会送信前の最終確認（時間・人数・送迎・ホテルを表示）
+       → 送信 / 編集メニュー / 最初から
+    """
     sess = SESS.get(user_id, {})
     lang = sess.get("lang", "jp")
     if not sess.get("time_iso") or not sess.get("pax"):
@@ -923,20 +1003,49 @@ def ask_confirm(reply_token, user_id):
     pick  = "希望" if sess.get("pickup") else "不要"
     hotel = sess.get("hotel") or "-"
 
-    jp = f"この内容で照会します。\n時間：{t_str}\n人数：{sess['pax']}名\n送迎：{pick}（{hotel}）\nよろしいですか？"
-    en = f"We will inquire with:\nTime: {t_str}\nParty: {sess['pax']}\nPickup: {'Need' if sess.get('pickup') else 'No'} ({hotel})\nProceed?"
+    jp = (f"この内容で照会します。\n"
+          f"時間：{t_str}\n人数：{sess['pax']}名\n送迎：{pick}（{hotel}）\n\n"
+          "よろしければ『照会を送る』を押してください。")
+    en = (f"We will inquire with:\n"
+          f"Time: {t_str}\nParty: {sess['pax']}\nPickup: {'Need' if sess.get('pickup') else 'No'} ({hotel})\n\n"
+          "If OK, tap “Send request”.")
 
     actions = [
-        PostbackAction(label=lang_text(lang, "はい", "Yes"),  data=json.dumps({"step":"confirm","v":"yes"})),
-        PostbackAction(label=lang_text(lang, "いいえ", "No"), data=json.dumps({"step":"confirm","v":"no"})),
+        PostbackAction(label=lang_text(lang, "照会を送る", "Send request"),
+                       data=json.dumps({"step":"confirm","v":"yes"})),
+        PostbackAction(label=lang_text(lang, "内容を修正", "Edit details"),
+                       data=json.dumps({"step":"edit_request_menu"})),
+        PostbackAction(label=lang_text(lang, "最初から", "Start over"),
+                       data=json.dumps({"step":"confirm","v":"no"})),
     ]
     reply_or_push(user_id, reply_token, TextSendMessage(lang_text(lang, jp, en), quick_reply=qreply(actions)))
+# ★ここから追加：時間/人数/送迎/ホテルのどれを直すか
+def ask_edit_request_menu(reply_token, user_id):
+    lang = SESS.get(user_id, {}).get("lang", "jp")
+    jp = "どこを修正しますか？"
+    en = "What would you like to edit?"
+    actions = [
+        PostbackAction(label=lang_text(lang, "時間を修正", "Edit time"),
+                       data=json.dumps({"step":"edit_request","target":"time"})),
+        PostbackAction(label=lang_text(lang, "人数を修正", "Edit party"),
+                       data=json.dumps({"step":"edit_request","target":"pax"})),
+        PostbackAction(label=lang_text(lang, "送迎を修正", "Edit pickup"),
+                       data=json.dumps({"step":"edit_request","target":"pickup"})),
+        PostbackAction(label=lang_text(lang, "ホテル名を修正", "Edit hotel"),
+                       data=json.dumps({"step":"edit_request","target":"hotel"})),
+        PostbackAction(label=lang_text(lang, "修正なし（戻る）", "No change (back)"),
+                       data=json.dumps({"step":"edit_request","target":"back"})),
+    ]
+    reply_or_push(user_id, reply_token,
+                  TextSendMessage(lang_text(lang, jp, en), quick_reply=qreply(actions)))
+# ★ここまで追加
 
 
-
-# ★ここから新規追加：予約確定の最終確認（店舗を選んで氏名・電話を入れた後）
+# ★ここから新規置換：店舗決定＋氏名/電話入力後の最終確認（編集メニュー付き）
 def ask_booking_confirm(reply_token, user_id):
-    """店舗決定後、氏名・電話まで受け取った後の最終予約確認"""
+    """店舗決定後、氏名・電話まで受け取った後の最終予約確認
+       → 予約確定 / 氏名だけ直す / 電話だけ直す / やめる
+    """
     pb   = PENDING_BOOK.get(user_id, {})
     req  = REQUESTS.get(pb.get("req_id"))
     st   = STORE_BY_ID.get(pb.get("store_id"))
@@ -952,35 +1061,60 @@ def ask_booking_confirm(reply_token, user_id):
     pick  = "希望" if req["pickup"] else "不要"
     hotel = req.get("hotel") or "-"
 
+    # 見やすく改行
     jp = (
-        f"この内容で予約を確定します。\n"
+        "【入力情報の確認】\n"
         f"店舗：{st['name']}\n"
         f"時間：{t_str}\n"
         f"人数：{req['pax']}名\n"
         f"送迎：{pick}（{hotel}）\n"
         f"お名前：{pb['name']}\n"
-        f"電話：{pb['phone']}\n"
-        f"よろしいですか？"
+        f"電話：{pb['phone']}\n\n"
+        "この内容でよろしければ「予約確定」を押してください。"
     )
     en = (
-        f"Confirm booking with:\n"
+        "[Please review your details]\n"
         f"Restaurant: {st['name']}\n"
         f"Time: {t_str}\n"
         f"Party: {req['pax']}\n"
         f"Pickup: {'Need' if req['pickup'] else 'No'} ({hotel})\n"
         f"Name: {pb['name']}\n"
-        f"Phone: {pb['phone']}\n"
-        f"Proceed?"
+        f"Phone: {pb['phone']}\n\n"
+        "If everything looks good, tap “Confirm booking”."
     )
 
     actions = [
-        PostbackAction(label=lang_text(lang, "はい", "Yes"),
-                       data=json.dumps({"step":"book_confirm", "v":"yes"})),
-        PostbackAction(label=lang_text(lang, "いいえ", "No"),
-                       data=json.dumps({"step":"book_confirm", "v":"no"})),
+        # 予約確定（従来のYes）
+        PostbackAction(label=lang_text(lang, "予約確定", "Confirm booking"),
+                       data=json.dumps({"step":"book_confirm","v":"yes"})),
+        # 氏名/電話の片方だけ直すメニューへ
+        PostbackAction(label=lang_text(lang, "氏名/電話を修正", "Edit name/phone"),
+                       data=json.dumps({"step":"edit_personal_menu"})),
+        # 取り消して最初から
+        PostbackAction(label=lang_text(lang, "やめる", "Cancel"),
+                       data=json.dumps({"step":"book_confirm","v":"no"})),
     ]
     reply_or_push(user_id, reply_token,
                   TextSendMessage(lang_text(lang, jp, en), quick_reply=qreply(actions)))
+# ★ここまで置換
+
+# ★ここから追加：氏名/電話のどちらを修正するか選ばせる
+def ask_edit_personal_menu(reply_token, user_id):
+    lang = SESS.get(user_id, {}).get("lang", "jp")
+    jp = "どちらを修正しますか？"
+    en = "What would you like to edit?"
+    actions = [
+        PostbackAction(label=lang_text(lang, "名前を修正", "Edit name"),
+                       data=json.dumps({"step":"edit_personal","target":"name"})),
+        PostbackAction(label=lang_text(lang, "電話を修正", "Edit phone"),
+                       data=json.dumps({"step":"edit_personal","target":"phone"})),
+        PostbackAction(label=lang_text(lang, "修正なし（戻る）", "No change (back)"),
+                       data=json.dumps({"step":"edit_personal","target":"back"})),
+    ]
+    reply_or_push(user_id, reply_token,
+                  TextSendMessage(lang_text(lang, jp, en), quick_reply=qreply(actions)))
+# ★ここまで追加
+
 
 # ====== 照会スタート → 店舗一斉送信 ======
 def start_inquiry(reply_token, user_id):
